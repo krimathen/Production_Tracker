@@ -1,12 +1,19 @@
 import sqlite3
+import sys
 from pathlib import Path
 
 DB_NAME = "app.db"
 
 
 def get_data_dir() -> Path:
-    """Return path to the project's data directory."""
-    data_dir = Path(__file__).resolve().parent / "data"
+    """Return path to a persistent data directory (next to exe when frozen)."""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled exe → use folder next to the exe
+        base_dir = Path(sys.executable).resolve().parent
+    else:
+        # Running from source
+        base_dir = Path(__file__).resolve().parent
+    data_dir = base_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
@@ -36,7 +43,6 @@ def migrate_db():
         )
     """)
 
-    # Get current version (default = 1)
     cursor.execute("SELECT version FROM schema_version LIMIT 1")
     row = cursor.fetchone()
     if row is None:
@@ -45,20 +51,17 @@ def migrate_db():
     else:
         version = row[0]
 
-    # --- Migration from v1 → v2 (add start_time / end_time to employee_hours) ---
+    # v1 → v2: add start_time / end_time to employee_hours
     if version < 2:
-        try:
-            cursor.execute("ALTER TABLE employee_hours ADD COLUMN start_time TEXT")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cursor.execute("ALTER TABLE employee_hours ADD COLUMN end_time TEXT")
-        except sqlite3.OperationalError:
-            pass
-        cursor.execute("UPDATE schema_version SET version = 2")
+        for col in ("start_time", "end_time"):
+            try:
+                cursor.execute(f"ALTER TABLE employee_hours ADD COLUMN {col} TEXT")
+            except sqlite3.OperationalError:
+                pass
+        cursor.execute("UPDATE schema_version SET version=2")
         print("✅ Migrated DB to version 2")
 
-    # --- Migration: add order_index to settings_stages ---
+    # v2 → v3: add order_index to settings_stages
     if version < 3:
         try:
             cursor.execute("ALTER TABLE settings_stages ADD COLUMN order_index INTEGER")
@@ -69,21 +72,29 @@ def migrate_db():
         for idx, (sid,) in enumerate(rows, start=1):
             cursor.execute("UPDATE settings_stages SET order_index=? WHERE id=?", (idx, sid))
         cursor.execute("UPDATE schema_version SET version=3")
-        print("✅ Migrated DB to version 3: added order_index to settings_stages")
+        print("✅ Migrated DB to version 3")
 
-    # --- Migration v3 → v4 ---
+    # v3 → v4: ensure credit_audit has ro_number
     if version < 4:
-        # If credit_audit already has ro_number, nothing to do
         cursor.execute("PRAGMA table_info(credit_audit)")
         cols = [c[1] for c in cursor.fetchall()]
         if "ro_number" not in cols:
             cursor.execute("ALTER TABLE credit_audit ADD COLUMN ro_number INTEGER")
-        # No more backfill from ro_id, since that column is gone
         cursor.execute("UPDATE schema_version SET version=4")
-        print("✅ Migrated DB to version 4: credit_audit now uses ro_number")
+        print("✅ Migrated DB to version 4")
+
+    # v4 → v5: enforce UNIQUE on repair_orders.ro_number
+    if version < 5:
+        cursor.execute("PRAGMA index_list(repair_orders)")
+        indexes = [i[1] for i in cursor.fetchall()]
+        if "idx_ro_number_unique" not in indexes:
+            cursor.execute("CREATE UNIQUE INDEX idx_ro_number_unique ON repair_orders(ro_number)")
+        cursor.execute("UPDATE schema_version SET version=5")
+        print("✅ Migrated DB to version 5")
 
     conn.commit()
     conn.close()
+
 
 
 EXPECTED_COLUMNS = [
