@@ -1,0 +1,23 @@
+# Python Cache
+__pycache__/
+*.pyc
+
+# Virtual Environment
+.venv/
+env/
+venv/
+
+#SQLite / local DB
+*.db
+*.sqlite3
+/data/
+
+# PyInstaller / build artifacts
+dist/
+build/
+*.spec
+
+#IDE/editor files
+.vscode/
+.idea/
+*.swp
