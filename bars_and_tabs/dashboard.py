@@ -62,7 +62,12 @@ class DashboardPage(QWidget):
 
             # --- Hours assigned per employee ---
             assigned = defaultdict(lambda: defaultdict(float))
-            cursor.execute("SELECT tech, painter, mechanic, body_hours, refinish_hours, mechanical_hours FROM repair_orders WHERE status != 'Closed'")
+            cursor.execute("""
+                           SELECT tech, painter, mechanic, body_hours, refinish_hours, mechanical_hours
+                           FROM repair_orders
+                           WHERE status != 'Closed'
+                          AND stage NOT IN ('Mechanical', 'Detail', 'QC', 'Delivered')
+                           """)
             for tech, painter, mech, body, refinish, mech_hours in cursor.fetchall():
                 if tech and tech != "Unassigned":
                     assigned[tech]["Tech"] += body

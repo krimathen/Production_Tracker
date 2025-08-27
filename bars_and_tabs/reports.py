@@ -2,13 +2,18 @@
 import csv
 from collections import defaultdict
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QTableWidget, QLabel, QTabWidget,
+    QWidget, QVBoxLayout, QPushButton, QTableWidget, QLabel, QTabWidget, QDateEdit,
     QTableWidgetItem, QFileDialog, QMessageBox, QHBoxLayout, QAbstractItemView
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDate
 from datetime import datetime
 from database import get_connection
 from key_bindings import add_refresh_shortcut
+
+class SafeDateEdit(QDateEdit):
+    """QDateEdit that ignores mouse wheel events to prevent accidental changes."""
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class EmployeeHoursTab(QWidget):
@@ -211,9 +216,18 @@ class CreditAuditLogTab(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Credit Audit Log"))
 
+        # --- Buttons ---
+        btn_layout = QHBoxLayout()
+        self.save_btn = QPushButton("Save Changes")
+        btn_layout.addWidget(self.save_btn)
+        layout.addLayout(btn_layout)
+
+        self.save_btn.clicked.connect(self.save_changes)
+
         self.table = QTableWidget()
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["Date", "RO #", "Employee", "Hours", "Note"])
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
         layout.addWidget(self.table)
 
         # F5 key to refresh tab
@@ -226,19 +240,53 @@ class CreditAuditLogTab(QWidget):
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT date, ro_number, employee, hours, note
-                FROM credit_audit
-                ORDER BY id DESC
-            """)
+                           SELECT id, date, ro_number, employee, hours, note
+                           FROM credit_audit
+                           ORDER BY id DESC
+                           """)
             rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
-        for r, (date, ro_number, emp, hrs, note) in enumerate(rows):
-            self.table.setItem(r, 0, QTableWidgetItem(date))
+        self.ids = []
+        for r, (row_id, date, ro_number, emp, hrs, note) in enumerate(rows):
+            self.ids.append(row_id)
+
+            # --- Date field as QDateEdit (calendar popup) ---
+            date_edit = SafeDateEdit()
+            date_edit.setDisplayFormat("MM/dd/yyyy")
+            date_edit.setCalendarPopup(True)
+
+            # Try to parse the stored string as MM/dd/yyyy
+            qdate = QDate.fromString(date.split()[0], "MM/dd/yyyy")  # strips time if present
+            if qdate.isValid():
+                date_edit.setDate(qdate)
+            else:
+                date_edit.setDate(QDate.currentDate())
+
+            self.table.setCellWidget(r, 0, date_edit)
+
+            # Other columns read-only
             self.table.setItem(r, 1, QTableWidgetItem(str(ro_number)))
             self.table.setItem(r, 2, QTableWidgetItem(emp))
             self.table.setItem(r, 3, QTableWidgetItem(f"{hrs:.2f}"))
             self.table.setItem(r, 4, QTableWidgetItem(note or ""))
+
+            # Lock other columns from editing
+            for c in range(1, 5):
+                item = self.table.item(r, c)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+    def save_changes(self):
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            for r, row_id in enumerate(self.ids):
+                date_widget = self.table.cellWidget(r, 0)
+                new_date = date_widget.date().toString("MM/dd/yyyy")
+                cursor.execute("UPDATE credit_audit SET date=? WHERE id=?", (new_date, row_id))
+        QMessageBox.information(self, "Saved", "Audit log dates updated.")
+        self.load_data()
+
 
 class ReportsPage(QTabWidget):
     def __init__(self):

@@ -106,6 +106,9 @@ class RepairOrdersPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self.open_ro_detail_dialog)
+
+        self.table.verticalHeader().setVisible(False)
+
         layout.addWidget(self.table)
 
         self.search_box.textChanged.connect(self.load_data)
@@ -207,9 +210,10 @@ class RepairOrdersPage(QWidget):
         with get_connection() as conn:
             cursor = conn.cursor()
             query = """SELECT id, date, ro_number, estimator, tech, painter, mechanic, stage, status
-                       FROM repair_orders \
+                       FROM repair_orders
                        WHERE 1=1"""
             params = []
+
             if not self.show_closed_cb.isChecked():
                 query += " AND status != ?"
                 params.append("Closed")
@@ -227,6 +231,9 @@ class RepairOrdersPage(QWidget):
                     OR stage LIKE ?
                 )"""
                 params.extend([like] * 7)
+
+            # ✅ make sure ORDER BY is last
+            query += " ORDER BY ro_number"
 
             cursor.execute(query, params)
             rows = cursor.fetchall()
