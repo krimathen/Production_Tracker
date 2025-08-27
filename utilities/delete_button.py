@@ -28,14 +28,12 @@ def delete_with_confirmation(parent, table_name: str, id_column: str, ids: list[
     )
 
     if reply == QMessageBox.Yes:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.executemany(
-            f"DELETE FROM {table_name} WHERE {id_column} = ?",
-            [(i,) for i in ids],
-        )
-        conn.commit()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                f"DELETE FROM {table_name} WHERE {id_column} = ?",
+                [(i,) for i in ids],
+            )
 
         if len(ids) == 1:
             QMessageBox.information(parent, "Deleted", f"Deleted RO ID {ids[0]}.")

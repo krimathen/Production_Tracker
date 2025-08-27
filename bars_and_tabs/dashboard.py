@@ -34,44 +34,43 @@ class DashboardPage(QWidget):
         self.load_data()
 
     def load_data(self):
-        conn = get_connection()
-        cursor = conn.cursor()
+        with get_connection() as conn:
+            cursor = conn.cursor()
 
-        # --- Stage counts in workflow order ---
-        STAGES = [
-            "Scheduled",
-            "Intake",
-            "Disassembly",
-            "Body",
-            "Refinish",
-            "Reassembly",
-            "Mechanical",
-            "Detail",
-            "QC",
-            "Delivered",
-        ]
+            # --- Stage counts in workflow order ---
+            STAGES = [
+                "Scheduled",
+                "Intake",
+                "Disassembly",
+                "Body",
+                "Refinish",
+                "Reassembly",
+                "Mechanical",
+                "Detail",
+                "QC",
+                "Delivered",
+            ]
 
-        cursor.execute("SELECT stage, COUNT(*) FROM repair_orders WHERE status != 'Closed' GROUP BY stage")
-        raw_counts = dict(cursor.fetchall())
+            cursor.execute("SELECT stage, COUNT(*) FROM repair_orders WHERE status != 'Closed' GROUP BY stage")
+            raw_counts = dict(cursor.fetchall())
 
-        self.stage_table.setRowCount(len(STAGES))
-        for r, stage in enumerate(STAGES):
-            count = raw_counts.get(stage, 0)
-            self.stage_table.setItem(r, 0, QTableWidgetItem(stage))
-            self.stage_table.setItem(r, 1, QTableWidgetItem(str(count)))
+            self.stage_table.setRowCount(len(STAGES))
+            for r, stage in enumerate(STAGES):
+                count = raw_counts.get(stage, 0)
+                self.stage_table.setItem(r, 0, QTableWidgetItem(stage))
+                self.stage_table.setItem(r, 1, QTableWidgetItem(str(count)))
 
-        # --- Hours assigned per employee ---
-        assigned = defaultdict(lambda: defaultdict(float))
-        cursor.execute("SELECT tech, painter, mechanic, body_hours, refinish_hours, mechanical_hours FROM repair_orders WHERE status != 'Closed'")
-        for tech, painter, mech, body, refinish, mech_hours in cursor.fetchall():
-            if tech and tech != "Unassigned":
-                assigned[tech]["Tech"] += body
-            if painter and painter != "Unassigned":
-                assigned[painter]["Painter"] += refinish
-            if mech and mech != "Unassigned":
-                assigned[mech]["Mechanic"] += mech_hours
+            # --- Hours assigned per employee ---
+            assigned = defaultdict(lambda: defaultdict(float))
+            cursor.execute("SELECT tech, painter, mechanic, body_hours, refinish_hours, mechanical_hours FROM repair_orders WHERE status != 'Closed'")
+            for tech, painter, mech, body, refinish, mech_hours in cursor.fetchall():
+                if tech and tech != "Unassigned":
+                    assigned[tech]["Tech"] += body
+                if painter and painter != "Unassigned":
+                    assigned[painter]["Painter"] += refinish
+                if mech and mech != "Unassigned":
+                    assigned[mech]["Mechanic"] += mech_hours
 
-        conn.close()
 
         # Flatten & sort by role order (Tech → Painter → Mechanic)
         ROLE_ORDER = {"Tech": 0, "Painter": 1, "Mechanic": 2}

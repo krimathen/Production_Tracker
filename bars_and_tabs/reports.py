@@ -50,38 +50,36 @@ class EmployeeHoursTab(QWidget):
         if not file_path:
             return
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            with open(file_path, newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    date = row["Date"].strip()
-                    employee = row["Name"].strip()
-                    start = row["Start"].strip()
-                    end = row["End"].strip()
-                    try:
-                        t1 = datetime.strptime(start, "%I:%M %p")
-                        t2 = datetime.strptime(end, "%I:%M %p")
-                        hours = (t2 - t1).seconds / 3600.0
-                    except Exception:
-                        hours = 0.0
-                    cursor.execute(
-                        "INSERT INTO employee_hours (date, employee, start_time, end_time, hours_worked) VALUES (?, ?, ?, ?, ?)",
-                        (date, employee, start, end, hours),
-                    )
-            conn.commit()
-            conn.close()
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                with open(file_path, newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        date = row["Date"].strip()
+                        employee = row["Name"].strip()
+                        start = row["Start"].strip()
+                        end = row["End"].strip()
+                        try:
+                            t1 = datetime.strptime(start, "%I:%M %p")
+                            t2 = datetime.strptime(end, "%I:%M %p")
+                            hours = (t2 - t1).seconds / 3600.0
+                        except Exception:
+                            hours = 0.0
+                        cursor.execute(
+                            "INSERT INTO employee_hours (date, employee, start_time, end_time, hours_worked) VALUES (?, ?, ?, ?, ?)",
+                            (date, employee, start, end, hours),
+                        )
+
             QMessageBox.information(self, "Import Successful", "CSV data imported successfully.")
             self.load_data()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import CSV:\n{e}")
 
     def load_data(self):
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, date, employee, start_time, end_time, hours_worked FROM employee_hours ORDER BY date")
-        rows = cursor.fetchall()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, date, employee, start_time, end_time, hours_worked FROM employee_hours ORDER BY date")
+            rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
         self.ids = []
@@ -94,28 +92,27 @@ class EmployeeHoursTab(QWidget):
             self.table.setItem(r, 4, QTableWidgetItem(f"{hours:.2f}"))
 
     def save_changes(self):
-        conn = get_connection()
-        cursor = conn.cursor()
-        for r, row_id in enumerate(self.ids):
-            date = self.table.item(r, 0).text()
-            employee = self.table.item(r, 1).text()
-            start = self.table.item(r, 2).text()
-            end = self.table.item(r, 3).text()
-            try:
-                t1 = datetime.strptime(start, "%I:%M %p")
-                t2 = datetime.strptime(end, "%I:%M %p")
-                hours = (t2 - t1).seconds / 3600.0
-            except Exception:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            for r, row_id in enumerate(self.ids):
+                date = self.table.item(r, 0).text()
+                employee = self.table.item(r, 1).text()
+                start = self.table.item(r, 2).text()
+                end = self.table.item(r, 3).text()
                 try:
-                    hours = float(self.table.item(r, 4).text())
+                    t1 = datetime.strptime(start, "%I:%M %p")
+                    t2 = datetime.strptime(end, "%I:%M %p")
+                    hours = (t2 - t1).seconds / 3600.0
                 except Exception:
-                    hours = 0.0
-            cursor.execute(
-                "UPDATE employee_hours SET date=?, employee=?, start_time=?, end_time=?, hours_worked=? WHERE id=?",
-                (date, employee, start, end, hours, row_id),
-            )
-        conn.commit()
-        conn.close()
+                    try:
+                        hours = float(self.table.item(r, 4).text())
+                    except Exception:
+                        hours = 0.0
+                cursor.execute(
+                    "UPDATE employee_hours SET date=?, employee=?, start_time=?, end_time=?, hours_worked=? WHERE id=?",
+                    (date, employee, start, end, hours, row_id),
+                )
+
         QMessageBox.information(self, "Saved", "Changes saved to database.")
         self.load_data()
 
@@ -132,11 +129,10 @@ class EmployeeHoursTab(QWidget):
         if reply != QMessageBox.Yes:
             return
         ids_to_delete = [self.ids[idx.row()] for idx in selected]
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.executemany("DELETE FROM employee_hours WHERE id=?", [(i,) for i in ids_to_delete])
-        conn.commit()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany("DELETE FROM employee_hours WHERE id=?", [(i,) for i in ids_to_delete])
+
         self.load_data()
         QMessageBox.information(self, "Deleted", f"Deleted {len(ids_to_delete)} record(s).")
 
@@ -156,11 +152,10 @@ class CreditedHoursTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
-        rows = cursor.fetchall()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
+            rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
         for r, (emp, hrs) in enumerate(rows):
@@ -185,14 +180,13 @@ class EfficiencyTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT employee, SUM(hours_worked) FROM employee_hours GROUP BY employee")
-        worked_map = {emp: total or 0 for emp, total in cursor.fetchall()}
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT employee, SUM(hours_worked) FROM employee_hours GROUP BY employee")
+            worked_map = {emp: total or 0 for emp, total in cursor.fetchall()}
 
-        cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
-        credits_map = {emp: total or 0 for emp, total in cursor.fetchall()}
-        conn.close()
+            cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
+            credits_map = {emp: total or 0 for emp, total in cursor.fetchall()}
 
         employees = set(worked_map.keys()) | set(credits_map.keys())
         self.table.setRowCount(len(employees))
@@ -229,15 +223,14 @@ class CreditAuditLogTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT date, ro_number, employee, hours, note
-            FROM credit_audit
-            ORDER BY id DESC
-        """)
-        rows = cursor.fetchall()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT date, ro_number, employee, hours, note
+                FROM credit_audit
+                ORDER BY id DESC
+            """)
+            rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
         for r, (date, ro_number, emp, hrs, note) in enumerate(rows):

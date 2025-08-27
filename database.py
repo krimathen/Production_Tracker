@@ -24,10 +24,11 @@ def get_db_path() -> Path:
 
 
 def get_connection():
-    """Return a connection to the SQLite database with sensible settings."""
-    conn = sqlite3.connect(get_db_path(), timeout=30.0)  # wait up to 30s instead of failing immediately
+    """Return a robust SQLite connection (WAL, timeout, autocommit, FK)."""
+    conn = sqlite3.connect(get_db_path(), timeout=30.0, isolation_level=None)  # autocommit
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")  # write-ahead logging = allows concurrent readers & safer writers
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
 

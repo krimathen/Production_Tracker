@@ -162,23 +162,20 @@ class Status_Settings(QWidget):
     def refresh_list(self):
         from database import get_connection
         self.status_list.clear()
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM settings_statuses ORDER BY name")
-        for (name,) in cursor.fetchall():
-            self.status_list.addItem(name)
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM settings_statuses ORDER BY name")
+            for (name,) in cursor.fetchall():
+                self.status_list.addItem(name)
 
     def add_status(self):
         from database import get_connection
         name = self.input_status.text().strip()
         if not name:
             return
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO settings_statuses(name) VALUES(?)", (name,))
-        conn.commit()
-        conn.close()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO settings_statuses(name) VALUES(?)", (name,))
         self.input_status.clear()
         self.refresh_list()
 
@@ -190,11 +187,9 @@ class Status_Settings(QWidget):
         name = item.text()
         reply = QMessageBox.question(self, "Confirm Delete", f"Delete status '{name}'?", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM settings_statuses WHERE name=?", (name,))
-            conn.commit()
-            conn.close()
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM settings_statuses WHERE name=?", (name,))
             self.refresh_list()
 
 
