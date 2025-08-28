@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, QDateEdit,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-    QDialog, QFormLayout, QLineEdit, QMessageBox, QAbstractItemView, QComboBox
+    QDialog, QFormLayout, QLineEdit, QMessageBox, QAbstractItemView, QSizePolicy
 )
 from PySide6.QtCore import QDate, QDateTime
 from database import get_connection
@@ -16,8 +16,8 @@ def log_stage_change(ro_id, stage):
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO ro_stage_history (ro_id, stage, date) VALUES (?, ?, ?)",
-            (ro_id, stage, QDateTime.currentDateTime().toString("MM/dd/yyyy hh:mm AP"))
-    )
+            (ro_id, stage, QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm AP"))
+        )
 
 
 def log_credit(ro_number, employee, hours, note):
@@ -37,7 +37,7 @@ def log_credit(ro_number, employee, hours, note):
             INSERT INTO credit_audit (date, ro_number, employee, hours, note)
             VALUES (?, ?, ?, ?, ?)
         """, (
-            QDateTime.currentDateTime().toString("MM/dd/yyyy hh:mm AP"),
+            QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm AP"),
             ro_number,
             employee,
             hours,
@@ -45,13 +45,12 @@ def log_credit(ro_number, employee, hours, note):
         ))
 
 
-
 class RepairOrdersPage(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
 
-        # --- Top bar ---
+        # --- Row 1: Top buttons + search ---
         top_layout = QHBoxLayout()
         self.new_ro_btn = QPushButton("New RO")
         self.new_ro_btn.clicked.connect(self.open_new_ro_dialog)
@@ -64,37 +63,60 @@ class RepairOrdersPage(QWidget):
         top_layout.addWidget(QLabel("Search:"))
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("RO#, Estimator, Tech, Painter, Mechanic")
+        self.search_box.textChanged.connect(self.load_data)
         top_layout.addWidget(self.search_box, stretch=1)
 
-        top_layout.addWidget(QLabel("From:"))
+        self.show_all_btn = QPushButton("Show All")
+        self.show_all_btn.clicked.connect(self.show_all)
+        top_layout.addWidget(self.show_all_btn)
+
+        layout.addLayout(top_layout)
+
+        # --- Row 2: Filters ---
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(4)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        today = QDate.currentDate()
+        ninety_days_ago = today.addDays(-90)
+
+        # From label + date
+        from_label = QLabel("From:")
+        from_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        filter_layout.addWidget(from_label)
+
         self.date_from = QDateEdit()
         self.date_from.setDisplayFormat("MM/dd/yyyy")
         self.date_from.setCalendarPopup(True)
-        self.date_from.setSpecialValueText("")
         self.date_from.setDateRange(QDate(1900, 1, 1), QDate(2100, 12, 31))
-        self.date_from.setDate(self.date_from.minimumDate())
-        top_layout.addWidget(self.date_from)
+        self.date_from.setDate(ninety_days_ago)
+        self.date_from.setSpecialValueText("")
+        filter_layout.addWidget(self.date_from)
 
-        top_layout.addWidget(QLabel("To:"))
+        # To label + date
+        to_label = QLabel("To:")
+        to_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        filter_layout.addWidget(to_label)
+
         self.date_to = QDateEdit()
         self.date_to.setDisplayFormat("MM/dd/yyyy")
         self.date_to.setCalendarPopup(True)
-        self.date_to.setSpecialValueText("")
         self.date_to.setDateRange(QDate(1900, 1, 1), QDate(2100, 12, 31))
-        self.date_to.setDate(QDate.currentDate())
-        top_layout.addWidget(self.date_to)
+        self.date_to.setDate(today)
+        self.date_to.setSpecialValueText("")
+        filter_layout.addWidget(self.date_to)
 
-        self.clear_date_btn = QPushButton("Clear Dates")
-        self.clear_date_btn.clicked.connect(self.clear_date_filter)
-        top_layout.addWidget(self.clear_date_btn)
+        # Apply Filter button
+        self.apply_filter_btn = QPushButton("Apply Filter")
+        self.apply_filter_btn.clicked.connect(self.apply_filter)
+        filter_layout.addWidget(self.apply_filter_btn)
 
+        # Show Closed checkbox
         self.show_closed_cb = QCheckBox("Show Closed")
         self.show_closed_cb.stateChanged.connect(self.load_data)
-        top_layout.addWidget(self.show_closed_cb)
+        filter_layout.addWidget(self.show_closed_cb)
 
-        self.date_from.dateChanged.connect(self.load_data)
-        self.date_to.dateChanged.connect(self.load_data)
-        layout.addLayout(top_layout)
+        layout.addLayout(filter_layout)
+        self.date_filter_enabled = True
 
         # --- Table ---
         self.table = QTableWidget()
@@ -106,12 +128,9 @@ class RepairOrdersPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self.open_ro_detail_dialog)
-
         self.table.verticalHeader().setVisible(False)
 
         layout.addWidget(self.table)
-
-        self.search_box.textChanged.connect(self.load_data)
 
         self.load_data()
         add_refresh_shortcut(self, self.load_data)
@@ -130,10 +149,22 @@ class RepairOrdersPage(QWidget):
             cursor = conn.cursor()
             cursor.execute(f"UPDATE repair_orders SET {field}=? WHERE id=?", (value, ro_id))
 
+    def show_all(self):
+        """Clear search + remove date limits (respect Show Closed)."""
+        self.search_box.clear()
+        self.date_filter_enabled = False
+        self.load_data()
+
+    def apply_filter(self):
+        """Apply the current from/to date range."""
+        self.date_filter_enabled = True
+        self.load_data()
 
     def clear_date_filter(self):
-        self.date_from.setDate(self.date_from.minimumDate())
-        self.date_to.setDate(QDate.currentDate())
+        today = QDate.currentDate()
+        ninety_days_ago = today.addDays(-90)
+        self.date_from.setDate(ninety_days_ago)
+        self.date_to.setDate(today)
         self.load_data()
 
     def open_new_ro_dialog(self):
@@ -214,10 +245,12 @@ class RepairOrdersPage(QWidget):
                        WHERE 1=1"""
             params = []
 
+            # --- Status filter ---
             if not self.show_closed_cb.isChecked():
                 query += " AND status != ?"
                 params.append("Closed")
 
+            # --- Text search filter ---
             text = self.search_box.text().strip()
             if text:
                 like = f"%{text}%"
@@ -232,20 +265,28 @@ class RepairOrdersPage(QWidget):
                 )"""
                 params.extend([like] * 7)
 
-            # ✅ make sure ORDER BY is last
-            query += " ORDER BY ro_number"
+            # --- Date range filter ---
+            if self.date_filter_enabled:
+                from_date = self.date_from.date()
+                to_date = self.date_to.date()
+                if from_date.isValid() and to_date.isValid():
+                    query += " AND date >= ? AND date <= ?"
+                    params.append(from_date.toString("yyyy-MM-dd"))
+                    params.append(to_date.toString("yyyy-MM-dd"))
 
+            # --- Order ---
+            query += " ORDER BY ro_number"
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-
+        # --- Populate table ---
         self.table.setRowCount(len(rows))
         statuses = self.load_statuses()
         stages = self.load_stages()
 
         for row_index, row in enumerate(rows):
             ro_id, date, ro_number, estimator, tech, painter, mechanic, stage, status = row
-
+            date_str = QDate.fromString(date, "yyyy-MM-dd").toString("MM/dd/yyyy")
             self.table.setItem(row_index, 0, QTableWidgetItem(date))
             self.table.setItem(row_index, 1, QTableWidgetItem(str(ro_number)))
             self.table.setItem(row_index, 2, QTableWidgetItem(estimator))
@@ -253,16 +294,12 @@ class RepairOrdersPage(QWidget):
             self.table.setItem(row_index, 4, QTableWidgetItem(painter))
             self.table.setItem(row_index, 5, QTableWidgetItem(mechanic))
 
-            # --- Stage combobox ---
+            # Stage combobox
             stage_cb = SafeComboBox()
             stage_cb.addItems(stages)
             if stage:
                 stage_cb.setCurrentText(stage)
-            else:
-                stage_cb.setCurrentIndex(0)
             self.table.setCellWidget(row_index, 6, stage_cb)
-
-            # bind with lambda to capture correct ro_id
             stage_cb.currentTextChanged.connect(
                 lambda value, rid=ro_id: (
                     self.update_field(rid, "stage", value),
@@ -271,15 +308,12 @@ class RepairOrdersPage(QWidget):
                 )
             )
 
-            # --- Status combobox ---
+            # Status combobox
             status_cb = SafeComboBox()
             status_cb.addItems(statuses)
             if status:
                 status_cb.setCurrentText(status)
-            else:
-                status_cb.setCurrentIndex(0)
             self.table.setCellWidget(row_index, 7, status_cb)
-
             status_cb.currentTextChanged.connect(
                 lambda value, rid=ro_id: (
                     self.update_field(rid, "status", value),
@@ -288,6 +322,7 @@ class RepairOrdersPage(QWidget):
             )
 
             self.table.setVerticalHeaderItem(row_index, QTableWidgetItem(str(ro_id)))
+
 
 class NewRODialog(QDialog):
     def __init__(self, parent=None):
@@ -367,7 +402,7 @@ class NewRODialog(QDialog):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    self.date_field.date().toString("MM/dd/yyyy"),
+                    self.date_field.date().toString("yyyy-MM-dd"),
                     int(self.ro_number_field.text()),
                     self.estimator_field.currentText(),
                     self.tech_field.currentText() or "Unassigned",
@@ -488,7 +523,7 @@ class RODetailDialog(QDialog):
                 hours_taken, hours_remaining, stage, status
             ) = row
 
-            self.date_field.setDate(QDate.fromString(date, "MM/dd/yyyy"))
+            self.date_field.setDate(QDate.fromString(date, "yyyy-MM-dd"))
             self.ro_number_field.setText(str(ro_number))
             self.estimator_field.setCurrentText(estimator)
             self.tech_field.setCurrentText(tech)
@@ -563,7 +598,7 @@ class RODetailDialog(QDialog):
                 WHERE id = ?
                 """,
                 (
-                    self.date_field.date().toString("MM/dd/yyyy"),
+                    self.date_field.date().toString("yyyy-MM-dd"),
                     int(self.ro_number_field.text()),
                     self.estimator_field.currentText(),
                     self.tech_field.currentText(),

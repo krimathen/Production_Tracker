@@ -31,6 +31,25 @@ def get_connection():
     conn.execute("PRAGMA synchronous = NORMAL;")
     return conn
 
+def migrate_dates():
+    """Convert old MM/dd/yyyy dates in repair_orders to ISO yyyy-MM-dd format."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            # Detect if any dates still have slashes (old format)
+            cursor.execute("SELECT date FROM repair_orders WHERE date LIKE '%/%' LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                cursor.execute("""
+                    UPDATE repair_orders
+                    SET date = substr(date, 7, 4) || '-' || substr(date, 1, 2) || '-' || substr(date, 4, 2)
+                    WHERE length(date) = 10
+                      AND date LIKE '__/__/____'
+                """)
+                print("✅ Migrated repair_orders.date to ISO format (yyyy-MM-dd)")
+        except Exception as e:
+            print(f"⚠️ migrate_dates failed: {e}")
+
 
 def migrate_db():
     """Run schema migrations safely without dropping existing data."""

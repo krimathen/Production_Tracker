@@ -256,8 +256,9 @@ class CreditAuditLogTab(QWidget):
             date_edit.setDisplayFormat("MM/dd/yyyy")
             date_edit.setCalendarPopup(True)
 
-            # Try to parse the stored string as MM/dd/yyyy
-            qdate = QDate.fromString(date.split()[0], "MM/dd/yyyy")  # strips time if present
+            # Parse stored ISO date (yyyy-MM-dd) and show as American (MM/dd/yyyy)
+            iso_str = date.split()[0]  # strip off any time portion if present
+            qdate = QDate.fromString(iso_str, "yyyy-MM-dd")
             if qdate.isValid():
                 date_edit.setDate(qdate)
             else:
@@ -282,7 +283,7 @@ class CreditAuditLogTab(QWidget):
             cursor = conn.cursor()
             for r, row_id in enumerate(self.ids):
                 date_widget = self.table.cellWidget(r, 0)
-                new_date = date_widget.date().toString("MM/dd/yyyy")
+                new_date = date_widget.date().toString("yyyy-MM-dd")
                 cursor.execute("UPDATE credit_audit SET date=? WHERE id=?", (new_date, row_id))
         QMessageBox.information(self, "Saved", "Audit log dates updated.")
         self.load_data()
