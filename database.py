@@ -2,10 +2,10 @@ import sqlite3
 import sys, shutil
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
-from utilities.migration_dialogue import NameMigrationDialog
+from PySide6.QtCore import QDate
+
 
 DB_NAME = "app.db"
-
 
 def get_data_dir() -> Path:
     """Return path to a persistent data directory (next to exe when frozen)."""
@@ -34,24 +34,45 @@ def get_connection():
     return conn
 
 def migrate_dates():
-    """Convert old MM/dd/yyyy dates in repair_orders to ISO yyyy-MM-dd format."""
+    """Normalize all stored dates in repair_orders, employee_hours, and credit_audit to ISO yyyy-MM-dd."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        try:
-            # Detect if any dates still have slashes (old format)
-            cursor.execute("SELECT date FROM repair_orders WHERE date LIKE '%/%' LIMIT 1")
-            row = cursor.fetchone()
-            if row:
-                cursor.execute("""
-                    UPDATE repair_orders
-                    SET date = substr(date, 7, 4) || '-' || substr(date, 1, 2) || '-' || substr(date, 4, 2)
-                    WHERE length(date) = 10
-                      AND date LIKE '__/__/____'
-                """)
-                print("✅ Migrated repair_orders.date to ISO format (yyyy-MM-dd)")
-        except Exception as e:
-            print(f"⚠️ migrate_dates failed: {e}")
 
+        # --- Repair Orders ---
+        cursor.execute("SELECT id, date FROM repair_orders")
+        for ro_id, date in cursor.fetchall():
+            if not date:
+                continue
+            qdate = QDate.fromString(str(date), "MM/dd/yyyy")
+            if qdate.isValid():
+                iso = qdate.toString("yyyy-MM-dd")
+                cursor.execute("UPDATE repair_orders SET date=? WHERE id=?", (iso, ro_id))
+
+        # --- Employee Hours ---
+        cursor.execute("SELECT id, date FROM employee_hours")
+        for row_id, date in cursor.fetchall():
+            if not date:
+                continue
+            qdate = QDate.fromString(str(date), "M/d/yyyy")  # handles 8/1/2025 style
+            if not qdate.isValid():
+                qdate = QDate.fromString(str(date), "MM/dd/yyyy")
+            if qdate.isValid():
+                iso = qdate.toString("yyyy-MM-dd")
+                cursor.execute("UPDATE employee_hours SET date=? WHERE id=?", (iso, row_id))
+
+        # --- Credit Audit ---
+        cursor.execute("SELECT id, date FROM credit_audit")
+        for row_id, date in cursor.fetchall():
+            if not date:
+                continue
+            iso_str = str(date).split()[0]  # cut off timestamp if present
+            qdate = QDate.fromString(iso_str, "MM/dd/yyyy")
+            if qdate.isValid():
+                iso = qdate.toString("yyyy-MM-dd")
+                cursor.execute("UPDATE credit_audit SET date=? WHERE id=?", (iso, row_id))
+
+        conn.commit()
+    print("✅ Migrated all dates to ISO (yyyy-MM-dd)")
 
 def migrate_db():
     """Run schema migrations safely without dropping existing data."""
@@ -114,36 +135,50 @@ def migrate_db():
         cursor.execute("UPDATE schema_version SET version=5")
         print("✅ Migrated DB to version 5")
 
-        # inside migrate_db():
-        if version < 6:
-            cursor.execute("PRAGMA table_info(employees)")
-            cols = [c[1] for c in cursor.fetchall()]
-            if "nickname" not in cols:
-                cursor.execute("ALTER TABLE employees ADD COLUMN nickname TEXT")
+    if version < 6:
+        cursor.execute("PRAGMA table_info(employees)")
+        cols = [c[1] for c in cursor.fetchall()]
+        if "nickname" not in cols:
+            cursor.execute("ALTER TABLE employees ADD COLUMN nickname TEXT")
 
-            # backup db first
-            db_path = get_db_path()
-            shutil.copy(db_path, db_path.with_name("app_backup_before_v6.db"))
+        # backup db first
+        db_path = get_db_path()
+        shutil.copy(db_path, db_path.with_name("app_backup_before_v6.db"))
 
-            # Run Qt dialogs if app context exists
-            app = QApplication.instance() or QApplication(sys.argv)
+        # Run Qt dialogs if app context exists
+        app = QApplication.instance() or QApplication(sys.argv)
 
-            cursor.execute("SELECT id, name, nickname FROM employees")
-            rows = cursor.fetchall()
-            for emp_id, current_name, current_nickname in rows:
-                if current_nickname:
-                    continue
-                if " " not in current_name.strip():
-                    dlg = NameMigrationDialog(current_name)
-                    if dlg.exec() and dlg.full_name:
-                        cursor.execute(
-                            "UPDATE employees SET name=?, nickname=? WHERE id=?",
-                            (dlg.full_name, current_name, emp_id)
-                        )
+        cursor.execute("SELECT id, name, nickname FROM employees")
+        rows = cursor.fetchall()
+        for emp_id, current_name, current_nickname in rows:
+            if current_nickname:
+                continue
+            if " " not in current_name.strip():
+                from utilities.migration_dialogue import NameMigrationDialog
+                dlg = NameMigrationDialog(current_name)
+                if dlg.exec() and dlg.full_name:
+                    full_name = dlg.full_name.strip()
 
-            cursor.execute("UPDATE schema_version SET version=6")
-            print("✅ Migrated DB to version 6 (GUI nickname migration)")
+                    # Update employee record
+                    cursor.execute(
+                        "UPDATE employees SET name=?, nickname=? WHERE id=?",
+                        (full_name, current_name, emp_id)
+                    )
 
+                    # Cascade into dependent tables
+                    cursor.execute(
+                        "UPDATE employee_hours SET employee=? WHERE employee=?",
+                        (full_name, current_name)
+                    )
+                    cursor.execute(
+                        "UPDATE credit_audit SET employee=? WHERE employee=?",
+                        (full_name, current_name)
+                    )
+
+                    print(f"→ Migrated {current_name} → {full_name} (nickname preserved)")
+
+        cursor.execute("UPDATE schema_version SET version=6")
+        print("✅ Migrated DB to version 6 (GUI nickname migration + cascade)")
 
     conn.commit()
     conn.close()
@@ -260,3 +295,4 @@ def initialize_db():
 
     conn.commit()
     conn.close()
+

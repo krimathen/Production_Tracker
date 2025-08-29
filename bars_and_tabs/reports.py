@@ -1,6 +1,6 @@
 
 import csv
-from collections import defaultdict
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QTableWidget, QLabel, QTabWidget, QDateEdit,
     QTableWidgetItem, QFileDialog, QMessageBox, QHBoxLayout, QAbstractItemView
@@ -81,6 +81,9 @@ class EmployeeHoursTab(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to import CSV:\n{e}")
 
     def load_data(self):
+        from utilities.employees import Employee
+        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
+
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT id, date, employee, start_time, end_time, hours_worked FROM employee_hours ORDER BY date")
@@ -90,8 +93,9 @@ class EmployeeHoursTab(QWidget):
         self.ids = []
         for r, (row_id, date, employee, start, end, hours) in enumerate(rows):
             self.ids.append(row_id)
+            display_name = emp_map.get(employee, employee)
             self.table.setItem(r, 0, QTableWidgetItem(date))
-            self.table.setItem(r, 1, QTableWidgetItem(employee))
+            self.table.setItem(r, 1, QTableWidgetItem(display_name))
             self.table.setItem(r, 2, QTableWidgetItem(start))
             self.table.setItem(r, 3, QTableWidgetItem(end))
             self.table.setItem(r, 4, QTableWidgetItem(f"{hours:.2f}"))
@@ -157,6 +161,9 @@ class CreditedHoursTab(QWidget):
         self.load_data()
 
     def load_data(self):
+        from utilities.employees import Employee
+        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
+
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
@@ -164,7 +171,8 @@ class CreditedHoursTab(QWidget):
 
         self.table.setRowCount(len(rows))
         for r, (emp, hrs) in enumerate(rows):
-            self.table.setItem(r, 0, QTableWidgetItem(emp))
+            display_name = emp_map.get(emp, emp)
+            self.table.setItem(r, 0, QTableWidgetItem(display_name))
             self.table.setItem(r, 1, QTableWidgetItem(f"{hrs:.2f}"))
 
 
@@ -185,6 +193,9 @@ class EfficiencyTab(QWidget):
         self.load_data()
 
     def load_data(self):
+        from utilities.employees import Employee
+        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
+
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT employee, SUM(hours_worked) FROM employee_hours GROUP BY employee")
@@ -197,14 +208,14 @@ class EfficiencyTab(QWidget):
         self.table.setRowCount(len(employees))
 
         for r, emp in enumerate(sorted(employees)):
+            display_name = emp_map.get(emp, emp)
             worked = worked_map.get(emp, 0)
             produced = credits_map.get(emp, 0)
             efficiency = produced / worked if worked > 0 else 0.0
 
-            self.table.setItem(r, 0, QTableWidgetItem(emp))
+            self.table.setItem(r, 0, QTableWidgetItem(display_name))
             self.table.setItem(r, 1, QTableWidgetItem(f"{worked:.2f}"))
             self.table.setItem(r, 2, QTableWidgetItem(f"{produced:.2f}"))
-
             eff_item = QTableWidgetItem(f"{efficiency:.2f}")
             eff_item.setBackground(Qt.green if efficiency >= 1.5 else Qt.red)
             self.table.setItem(r, 3, eff_item)
@@ -237,6 +248,9 @@ class CreditAuditLogTab(QWidget):
         self.load_data()
 
     def load_data(self):
+        from utilities.employees import Employee
+        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
+
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -250,6 +264,7 @@ class CreditAuditLogTab(QWidget):
         self.ids = []
         for r, (row_id, date, ro_number, emp, hrs, note) in enumerate(rows):
             self.ids.append(row_id)
+            display_name = emp_map.get(emp, emp)
 
             # --- Date field as QDateEdit (calendar popup) ---
             date_edit = SafeDateEdit()
@@ -268,7 +283,7 @@ class CreditAuditLogTab(QWidget):
 
             # Other columns read-only
             self.table.setItem(r, 1, QTableWidgetItem(str(ro_number)))
-            self.table.setItem(r, 2, QTableWidgetItem(emp))
+            self.table.setItem(r, 2, QTableWidgetItem(display_name))
             self.table.setItem(r, 3, QTableWidgetItem(f"{hrs:.2f}"))
             self.table.setItem(r, 4, QTableWidgetItem(note or ""))
 

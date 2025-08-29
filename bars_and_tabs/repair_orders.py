@@ -44,6 +44,13 @@ def log_credit(ro_number, employee, hours, note):
             note
         ))
 
+# resolve full name function
+def resolve_full(role, chosen_display):
+    for e in Employee.by_role(role):
+        if (e.nickname or e.name) == chosen_display:
+            return e.name
+    return chosen_display  # fallback if no match
+
 
 class RepairOrdersPage(QWidget):
     def __init__(self):
@@ -287,7 +294,7 @@ class RepairOrdersPage(QWidget):
         for row_index, row in enumerate(rows):
             ro_id, date, ro_number, estimator, tech, painter, mechanic, stage, status = row
             date_str = QDate.fromString(date, "yyyy-MM-dd").toString("MM/dd/yyyy")
-            self.table.setItem(row_index, 0, QTableWidgetItem(date))
+            self.table.setItem(row_index, 0, QTableWidgetItem(date_str))
             self.table.setItem(row_index, 1, QTableWidgetItem(str(ro_number)))
             self.table.setItem(row_index, 2, QTableWidgetItem(estimator))
             self.table.setItem(row_index, 3, QTableWidgetItem(tech))
@@ -344,10 +351,10 @@ class NewRODialog(QDialog):
         self.mechanic_field = SafeComboBox()
 
         # Load employees dynamically by role
-        estimators = [e.name for e in Employee.by_role("Estimator")]
-        techs = [e.name for e in Employee.by_role("Tech")]
-        painters = [e.name for e in Employee.by_role("Painter")]
-        mechanics = [e.name for e in Employee.by_role("Mechanic")]
+        estimators = [e.nickname or e.name for e in Employee.by_role("Estimator")]
+        techs = [e.nickname or e.name for e in Employee.by_role("Tech")]
+        painters = [e.nickname or e.name for e in Employee.by_role("Painter")]
+        mechanics = [e.nickname or e.name for e in Employee.by_role("Mechanic")]
 
         self.estimator_field.addItems(estimators)
 
@@ -391,23 +398,28 @@ class NewRODialog(QDialog):
             QMessageBox.warning(self, "Error", "Estimator is required.")
             return
 
+        estimator_full = resolve_full("Estimator", self.estimator_field.currentText())
+        tech_full = resolve_full("Tech", self.tech_field.currentText())
+        painter_full = resolve_full("Painter", self.painter_field.currentText())
+        mech_full = resolve_full("Mechanic", self.mechanic_field.currentText())
+
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 INSERT INTO repair_orders
                 (date, ro_number, estimator, tech, painter, mechanic,
-                 ro_hours, body_hours, refinish_hours, mechanical_hours,
-                 hours_taken, hours_remaining, status, stage)
+                ro_hours, body_hours, refinish_hours, mechanical_hours,
+                hours_taken, hours_remaining, status, stage)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.date_field.date().toString("yyyy-MM-dd"),
                     int(self.ro_number_field.text()),
-                    self.estimator_field.currentText(),
-                    self.tech_field.currentText() or "Unassigned",
-                    self.painter_field.currentText() or "Unassigned",
-                    self.mechanic_field.currentText() or "Unassigned",
+                    estimator_full,
+                    tech_full or "Unassigned",
+                    painter_full or "Unassigned",
+                    mech_full or "Unassigned",
                     float(self.ro_hours_field.text() or 0),
                     float(self.body_hours_field.text() or 0),
                     float(self.refinish_hours_field.text() or 0),
@@ -443,10 +455,10 @@ class RODetailDialog(QDialog):
         self.mechanic_field = SafeComboBox()
 
         # Load employees dynamically by role
-        estimators = [e.name for e in Employee.by_role("Estimator")]
-        techs = [e.name for e in Employee.by_role("Tech")]
-        painters = [e.name for e in Employee.by_role("Painter")]
-        mechanics = [e.name for e in Employee.by_role("Mechanic")]
+        estimators = [e.nickname or e.name for e in Employee.by_role("Estimator")]
+        techs = [e.nickname or e.name for e in Employee.by_role("Tech")]
+        painters = [e.nickname or e.name for e in Employee.by_role("Painter")]
+        mechanics = [e.nickname or e.name for e in Employee.by_role("Mechanic")]
 
         # Fill dropdowns
         self.estimator_field.addItems(estimators)
@@ -529,12 +541,12 @@ class RODetailDialog(QDialog):
             self.tech_field.setCurrentText(tech)
             self.painter_field.setCurrentText(painter)
             self.mechanic_field.setCurrentText(mechanic)
-            self.ro_hours_field.setText(str(ro_hours))
-            self.body_hours_field.setText(str(body_hours))
-            self.refinish_hours_field.setText(str(refinish_hours))
-            self.mechanical_hours_field.setText(str(mechanical_hours))
-            self.hours_taken_field.setText(str(hours_taken))
-            self.hours_remaining_field.setText(str(hours_remaining))
+            self.ro_hours_field.setText(f"{ro_hours:.1f}")
+            self.body_hours_field.setText(f"{body_hours:.1f}")
+            self.refinish_hours_field.setText(f"{refinish_hours:.1f}")
+            self.mechanical_hours_field.setText(f"{mechanical_hours:.1f}")
+            self.hours_taken_field.setText(f"{hours_taken:.1f}")
+            self.hours_remaining_field.setText(f"{hours_remaining:.1f}")
             self.stage_field.setCurrentText(stage)
             self.status_field.setCurrentText(status)
 
@@ -579,6 +591,11 @@ class RODetailDialog(QDialog):
                                    new_mech - old_mech,
                                    f"Mechanical hours adjusted {old_mech} → {new_mech}")
 
+            estimator_full = resolve_full("Estimator", self.estimator_field.currentText())
+            tech_full = resolve_full("Tech", self.tech_field.currentText())
+            painter_full = resolve_full("Painter", self.painter_field.currentText())
+            mech_full = resolve_full("Mechanic", self.mechanic_field.currentText())
+
             # --- Update repair order record ---
             cursor.execute(
                 """
@@ -600,10 +617,10 @@ class RODetailDialog(QDialog):
                 (
                     self.date_field.date().toString("yyyy-MM-dd"),
                     int(self.ro_number_field.text()),
-                    self.estimator_field.currentText(),
-                    self.tech_field.currentText(),
-                    self.painter_field.currentText(),
-                    self.mechanic_field.currentText(),
+                    estimator_full,
+                    tech_full or "Unassigned",
+                    painter_full or "Unassigned",
+                    mech_full or "Unassigned",
                     float(self.ro_hours_field.text() or 0),
                     new_body,
                     new_refinish,

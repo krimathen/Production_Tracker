@@ -76,18 +76,22 @@ class DashboardPage(QWidget):
                 if mech and mech != "Unassigned":
                     assigned[mech]["Mechanic"] += mech_hours
 
+            # Flatten & sort by role order (Tech → Painter → Mechanic)
+            ROLE_ORDER = {"Tech": 0, "Painter": 1, "Mechanic": 2}
+            flat_rows = []
+            for emp, roles in assigned.items():
+                for role, hours in roles.items():
+                    flat_rows.append((emp, role, hours))
 
-        # Flatten & sort by role order (Tech → Painter → Mechanic)
-        ROLE_ORDER = {"Tech": 0, "Painter": 1, "Mechanic": 2}
-        flat_rows = []
-        for emp, roles in assigned.items():
-            for role, hours in roles.items():
-                flat_rows.append((emp, role, hours))
+            flat_rows.sort(key=lambda x: (ROLE_ORDER.get(x[1], 99), x[0].lower()))
 
-        flat_rows.sort(key=lambda x: (ROLE_ORDER.get(x[1], 99), x[0].lower()))
+            # 🔑 Build employee map: full → display
+            from utilities.employees import Employee
+            emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
 
-        self.emp_table.setRowCount(len(flat_rows))
-        for r, (emp, role, hours) in enumerate(flat_rows):
-            self.emp_table.setItem(r, 0, QTableWidgetItem(emp))
-            self.emp_table.setItem(r, 1, QTableWidgetItem(role))
-            self.emp_table.setItem(r, 2, QTableWidgetItem(f"{hours:.2f}"))
+            self.emp_table.setRowCount(len(flat_rows))
+            for r, (emp, role, hours) in enumerate(flat_rows):
+                display_name = emp_map.get(emp, emp)  # fallback = full name
+                self.emp_table.setItem(r, 0, QTableWidgetItem(display_name))
+                self.emp_table.setItem(r, 1, QTableWidgetItem(role))
+                self.emp_table.setItem(r, 2, QTableWidgetItem(f"{hours:.2f}"))

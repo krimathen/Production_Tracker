@@ -1,7 +1,7 @@
 import csv
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QStackedWidget,
-    QFileDialog, QInputDialog, QMessageBox
+    QFileDialog, QInputDialog, QMessageBox, QDialog
 )
 from PySide6.QtCore import QDate
 from openpyxl import Workbook
@@ -103,17 +103,34 @@ class MainWindow(QMainWindow):
 
         where = ""
         params = []
+
         if choice == "Last 90 Days":
-            from_date = QDate.currentDate().addDays(-90).toString("yyyy-MM-dd")  # 🔥 ISO
+            from_date = QDate.currentDate().addDays(-90).toString("yyyy-MM-dd")
             to_date = QDate.currentDate().toString("yyyy-MM-dd")
-            where = "WHERE date BETWEEN ? AND ?"
-            params = [from_date, to_date]
-        elif choice == "Custom Date Range":
-            from_date = QDate.currentDate().addDays(-30).toString("yyyy-MM-dd")
-            to_date = QDate.currentDate().toString("yyyy-MM-dd")
-            where = "WHERE date BETWEEN ? AND ?"
+            where = "WHERE substr(date, 1, 10) BETWEEN ? AND ?"
             params = [from_date, to_date]
 
+        elif choice == "Custom Date Range":
+            from utilities.date_dialog import DatePickerDialog
+
+            # Start date
+            dlg1 = DatePickerDialog("Select Start Date", QDate.currentDate().addDays(-30), self)
+            if dlg1.exec() != QDialog.Accepted:
+                return
+            from_date = dlg1.selected_date
+
+            # End date
+            dlg2 = DatePickerDialog("Select End Date", QDate.currentDate(), self)
+            if dlg2.exec() != QDialog.Accepted:
+                return
+            to_date = dlg2.selected_date
+
+            from_iso = from_date.toString("yyyy-MM-dd")
+            to_iso = to_date.toString("yyyy-MM-dd")
+            where = "WHERE substr(date, 1, 10) BETWEEN ? AND ?"
+            params = [from_iso, to_iso]
+
+        # Ask for output file
         file, _ = QFileDialog.getSaveFileName(self, "Save Reports", "", "Excel Files (*.xlsx)")
         if not file:
             return
@@ -125,7 +142,11 @@ class MainWindow(QMainWindow):
         ws1.title = "Credited Hours"
         with get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(f"SELECT employee, SUM(hours) FROM credit_audit {where} GROUP BY employee", params)
+            query = f"SELECT employee, SUM(hours) FROM credit_audit {where} GROUP BY employee"
+            if params:
+                cur.execute(query, params)
+            else:
+                cur.execute(query)
             rows = cur.fetchall()
         ws1.append(["Employee", "Credited Hours"])
         for emp, hrs in rows:
@@ -135,10 +156,20 @@ class MainWindow(QMainWindow):
         ws2 = wb.create_sheet("Efficiency")
         with get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(f"SELECT employee, SUM(hours_worked) FROM employee_hours {where} GROUP BY employee", params)
+            query1 = f"SELECT employee, SUM(hours_worked) FROM employee_hours {where} GROUP BY employee"
+            if params:
+                cur.execute(query1, params)
+            else:
+                cur.execute(query1)
             worked_map = {emp: total or 0 for emp, total in cur.fetchall()}
-            cur.execute(f"SELECT employee, SUM(hours) FROM credit_audit {where} GROUP BY employee", params)
+
+            query2 = f"SELECT employee, SUM(hours) FROM credit_audit {where} GROUP BY employee"
+            if params:
+                cur.execute(query2, params)
+            else:
+                cur.execute(query2)
             credits_map = {emp: total or 0 for emp, total in cur.fetchall()}
+
         employees = set(worked_map.keys()) | set(credits_map.keys())
         ws2.append(["Employee", "Hours Worked", "Credited Hours", "Efficiency"])
         for emp in sorted(employees):
@@ -151,16 +182,34 @@ class MainWindow(QMainWindow):
         ws3 = wb.create_sheet("Audit Log")
         with get_connection() as conn:
             cur = conn.cursor()
-            cur.execute(f"SELECT date, ro_number, employee, hours, note FROM credit_audit {where} ORDER BY id DESC",
-                        params)
+            query3 = f"""
+                SELECT date, ro_number, employee, hours, note
+                FROM credit_audit
+                {where}
+                ORDER BY id DESC
+            """
+            if params:
+                cur.execute(query3, params)
+            else:
+                cur.execute(query3)
             rows = cur.fetchall()
         ws3.append(["Date", "RO#", "Employee", "Hours", "Note"])
         for row in rows:
             row = list(row)
-            # Convert ISO date → MM/dd/yyyy
-            row[0] = QDate.fromString(row[0], "yyyy-MM-dd").toString("MM/dd/yyyy")
+            if row[0]:
+                iso_str = str(row[0]).split()[0]  # strip timestamp if present
+                qdate = QDate.fromString(iso_str, "yyyy-MM-dd")
+                if qdate.isValid():
+                    row[0] = qdate.toString("MM/dd/yyyy")
+                else:
+                    row[0] = iso_str
+            else:
+                row[0] = ""
             ws3.append(row)
 
+        # Save Excel file
         wb.save(file)
         QMessageBox.information(self, "Export", f"Reports exported to {file}")
+
+
 
