@@ -46,8 +46,9 @@ class Employee_Settings(QWidget):
     def refresh_list(self):
         self.employee_list.clear()
         for emp in Employee.all():
+            display_name = emp.nickname if emp.nickname else emp.name
             roles_str = ", ".join(emp.roles) if emp.roles else "No Roles"
-            self.employee_list.addItem(f"{emp.name} [{roles_str}]")
+            self.employee_list.addItem(f"{display_name} [{roles_str}] (Full: {emp.name})")
 
     def add_employee(self):
         name = self.input_name.text().strip()
@@ -71,20 +72,20 @@ class Employee_Settings(QWidget):
             self.refresh_list()
 
     def open_role_editor(self, item):
-        # get selected employee by name
         text = item.text()
-        name = text.split(" [")[0]
-        emp = next((e for e in Employee.all() if e.name == name), None)
+        name = text.split(" [")[0]  # this extracts the display_name, which might be nickname
+        # Better: match by full name
+        emp = next((e for e in Employee.all() if e.name in text), None)
         if not emp:
             return
 
-        dialog = RoleEditorDialog(emp.id, emp.name, emp.roles, self)
+        dialog = RoleEditorDialog(emp.id, emp.name, emp.roles, emp.nickname, self)
         if dialog.exec():
             self.refresh_list()
 
 
 class RoleEditorDialog(QDialog):
-    def __init__(self, emp_id, emp_name, current_roles, parent=None):
+    def __init__(self, emp_id, emp_name, current_roles, current_nickname=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Edit Employee: {emp_name}")
         self.emp_id = emp_id
@@ -96,6 +97,13 @@ class RoleEditorDialog(QDialog):
         self.name_field.setText(emp_name)
         layout.addWidget(QLabel("Name:"))
         layout.addWidget(self.name_field)
+
+        # Editable nickname field
+        self.nickname_field = QLineEdit()
+        if current_nickname:
+            self.nickname_field.setText(current_nickname)
+        layout.addWidget(QLabel("Nickname (optional):"))
+        layout.addWidget(self.nickname_field)
 
         # Role checkboxes
         self.roles = {
@@ -118,6 +126,10 @@ class RoleEditorDialog(QDialog):
         new_name = self.name_field.text().strip()
         if new_name:
             Employee.rename(self.emp_id, new_name)
+
+        # Save nickname
+        new_nickname = self.nickname_field.text().strip()
+        Employee.set_nickname(self.emp_id, new_nickname if new_nickname else None)
 
         # Save updated roles
         selected_roles = [role for role, cb in self.roles.items() if cb.isChecked()]

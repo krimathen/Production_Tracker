@@ -1,6 +1,8 @@
 import sqlite3
-import sys
+import sys, shutil
 from pathlib import Path
+from PySide6.QtWidgets import QApplication
+from utilities.migration_dialogue import NameMigrationDialog
 
 DB_NAME = "app.db"
 
@@ -111,6 +113,37 @@ def migrate_db():
             cursor.execute("CREATE UNIQUE INDEX idx_ro_number_unique ON repair_orders(ro_number)")
         cursor.execute("UPDATE schema_version SET version=5")
         print("✅ Migrated DB to version 5")
+
+        # inside migrate_db():
+        if version < 6:
+            cursor.execute("PRAGMA table_info(employees)")
+            cols = [c[1] for c in cursor.fetchall()]
+            if "nickname" not in cols:
+                cursor.execute("ALTER TABLE employees ADD COLUMN nickname TEXT")
+
+            # backup db first
+            db_path = get_db_path()
+            shutil.copy(db_path, db_path.with_name("app_backup_before_v6.db"))
+
+            # Run Qt dialogs if app context exists
+            app = QApplication.instance() or QApplication(sys.argv)
+
+            cursor.execute("SELECT id, name, nickname FROM employees")
+            rows = cursor.fetchall()
+            for emp_id, current_name, current_nickname in rows:
+                if current_nickname:
+                    continue
+                if " " not in current_name.strip():
+                    dlg = NameMigrationDialog(current_name)
+                    if dlg.exec() and dlg.full_name:
+                        cursor.execute(
+                            "UPDATE employees SET name=?, nickname=? WHERE id=?",
+                            (dlg.full_name, current_name, emp_id)
+                        )
+
+            cursor.execute("UPDATE schema_version SET version=6")
+            print("✅ Migrated DB to version 6 (GUI nickname migration)")
+
 
     conn.commit()
     conn.close()
