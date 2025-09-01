@@ -211,7 +211,7 @@ EXPECTED_COLUMNS = [
 ]
 
 def initialize_db():
-    """Create tables if they don’t exist yet, and check schema (v2 baseline)."""
+    """Create tables if they don’t exist yet, and check schema (multi-role baseline)."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -220,9 +220,16 @@ def initialize_db():
         CREATE TABLE IF NOT EXISTS employees (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             full_name TEXT NOT NULL,
-            nickname TEXT,
-            role TEXT
+            nickname TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS employee_roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_roles_emp ON employee_roles(employee_id);
 
         CREATE TABLE IF NOT EXISTS repair_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,19 +302,9 @@ def initialize_db():
         """
     )
 
-    # Check schema of repair_orders against v2 expected
-    cursor.execute("PRAGMA table_info(repair_orders)")
-    cols = cursor.fetchall()
-    existing = [(c[1], c[2].upper()) for c in cols]
-
-    if existing != EXPECTED_COLUMNS:
-        print("⚠️ Database schema mismatch!")
-        print("Expected:", EXPECTED_COLUMNS)
-        print("Found:   ", existing)
-        print("Tip: Delete app.db in the data/ folder to rebuild fresh.")
-
     conn.commit()
     conn.close()
+
 
 
 

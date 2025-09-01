@@ -284,16 +284,17 @@ class CreditAuditLogTab(QWidget):
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT c.id, c.date, c.ro_id, e.full_name, e.nickname, c.hours, c.note
-                FROM credit_audit c
-                JOIN employees e ON c.employee_id = e.id
-                ORDER BY c.id DESC
-            """)
+                           SELECT c.id, c.date, r.ro_number, e.full_name, e.nickname, c.hours, c.note
+                           FROM credit_audit c
+                                    JOIN employees e ON c.employee_id = e.id
+                                    JOIN repair_orders r ON c.ro_id = r.id
+                           ORDER BY c.id DESC
+                           """)
             rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
         self.ids = []
-        for r, (row_id, date, ro_id, full_name, nickname, hrs, note) in enumerate(rows):
+        for r, (row_id, date, ro_number, full_name, nickname, hrs, note) in enumerate(rows):
             self.ids.append(row_id)
             display_name = nickname or full_name
 
@@ -308,7 +309,7 @@ class CreditAuditLogTab(QWidget):
                 date_edit.setDate(QDate.currentDate())
             self.table.setCellWidget(r, 0, date_edit)
 
-            self.table.setItem(r, 1, QTableWidgetItem(str(ro_id)))
+            self.table.setItem(r, 1, QTableWidgetItem(str(ro_number)))
             self.table.setItem(r, 2, QTableWidgetItem(display_name))
             self.table.setItem(r, 3, QTableWidgetItem(f"{hrs:.2f}"))
             self.table.setItem(r, 4, QTableWidgetItem(note or ""))

@@ -104,13 +104,14 @@ class RoleEditorDialog(QDialog):
         layout.addWidget(QLabel("Nickname (optional):"))
         layout.addWidget(self.nickname_field)
 
-        # Single role (schema v2 has one role column, not many)
-        self.role_field = SafeComboBox()
-        self.role_field.addItems(["Estimator", "Tech", "Painter", "Mechanic", "Other"])
-        if current_roles:
-            self.role_field.setCurrentText(current_roles[0])
-        layout.addWidget(QLabel("Role:"))
-        layout.addWidget(self.role_field)
+        # Multi-role checkboxes
+        self.roles = {}
+        for role in ["Estimator", "Tech", "Painter", "Mechanic", "Other"]:
+            cb = QCheckBox(role)
+            if role in current_roles:
+                cb.setChecked(True)
+            self.roles[role] = cb
+            layout.addWidget(cb)
 
         # Save button
         save_btn = QPushButton("Save")
@@ -118,18 +119,15 @@ class RoleEditorDialog(QDialog):
         layout.addWidget(save_btn)
 
     def save(self):
-        # Save updated name
         new_name = self.name_field.text().strip()
         if new_name:
             Employee.rename(self.emp_id, new_name)
 
-        # Save nickname
         new_nickname = self.nickname_field.text().strip()
         Employee.set_nickname(self.emp_id, new_nickname if new_nickname else None)
 
-        # Save role
-        selected_role = self.role_field.currentText()
-        Employee.set_role(self.emp_id, selected_role)
+        selected_roles = [role for role, cb in self.roles.items() if cb.isChecked()]
+        Employee.set_roles(self.emp_id, selected_roles)
 
         self.accept()
 
