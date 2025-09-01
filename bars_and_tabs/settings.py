@@ -1,8 +1,9 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
-    QLineEdit, QLabel, QCheckBox, QMessageBox, QDialog,QTabWidget
+    QLineEdit, QLabel, QCheckBox, QMessageBox, QDialog, QTabWidget
 )
 from utilities.employees import Employee
+from utilities.safe_combobox import SafeComboBox
 from key_bindings import add_refresh_shortcut, add_enter_shortcut
 
 
@@ -20,7 +21,7 @@ class Employee_Settings(QWidget):
         # Input + buttons
         input_layout = QHBoxLayout()
         self.input_name = QLineEdit()
-        self.input_name.setPlaceholderText("Employee name")
+        self.input_name.setPlaceholderText("Employee full name")
         input_layout.addWidget(self.input_name)
 
         add_btn = QPushButton("Add")
@@ -46,15 +47,15 @@ class Employee_Settings(QWidget):
     def refresh_list(self):
         self.employee_list.clear()
         for emp in Employee.all():
-            display_name = emp.nickname if emp.nickname else emp.name
-            roles_str = ", ".join(emp.roles) if emp.roles else "No Roles"
-            self.employee_list.addItem(f"{display_name} [{roles_str}] (Full: {emp.name})")
+            display_name = emp.nickname if emp.nickname else emp.full_name
+            role_str = emp.roles[0] if emp.roles else "No Role"
+            self.employee_list.addItem(f"{display_name} [{role_str}] (Full: {emp.full_name})")
 
     def add_employee(self):
-        name = self.input_name.text().strip()
-        if not name:
+        full_name = self.input_name.text().strip()
+        if not full_name:
             return
-        Employee.add(name)
+        Employee.add(full_name)
         self.input_name.clear()
         self.refresh_list()
 
@@ -62,8 +63,8 @@ class Employee_Settings(QWidget):
         item = self.employee_list.currentItem()
         if not item:
             return
-        name = item.text().split(" [")[0]  # extract just the name
-        emp = next((e for e in Employee.all() if e.name == name), None)
+        name = item.text().split(" [")[0]  # extract just the display name
+        emp = next((e for e in Employee.all() if (e.nickname or e.full_name) == name), None)
         if not emp:
             return
         reply = QMessageBox.question(self, "Confirm Delete", f"Delete {name}?", QMessageBox.Yes | QMessageBox.No)
@@ -73,13 +74,11 @@ class Employee_Settings(QWidget):
 
     def open_role_editor(self, item):
         text = item.text()
-        name = text.split(" [")[0]  # this extracts the display_name, which might be nickname
-        # Better: match by full name
-        emp = next((e for e in Employee.all() if e.name in text), None)
+        emp = next((e for e in Employee.all() if e.full_name in text), None)
         if not emp:
             return
 
-        dialog = RoleEditorDialog(emp.id, emp.name, emp.roles, emp.nickname, self)
+        dialog = RoleEditorDialog(emp.id, emp.full_name, emp.roles, emp.nickname, self)
         if dialog.exec():
             self.refresh_list()
 
@@ -95,7 +94,7 @@ class RoleEditorDialog(QDialog):
         # Editable name field
         self.name_field = QLineEdit()
         self.name_field.setText(emp_name)
-        layout.addWidget(QLabel("Name:"))
+        layout.addWidget(QLabel("Full Name:"))
         layout.addWidget(self.name_field)
 
         # Editable nickname field
@@ -105,16 +104,13 @@ class RoleEditorDialog(QDialog):
         layout.addWidget(QLabel("Nickname (optional):"))
         layout.addWidget(self.nickname_field)
 
-        # Role checkboxes
-        self.roles = {
-            "Estimator": QCheckBox("Estimator"),
-            "Tech": QCheckBox("Tech"),
-            "Painter": QCheckBox("Painter"),
-            "Mechanic": QCheckBox("Mechanic"),
-        }
-        for role, cb in self.roles.items():
-            cb.setChecked(role in current_roles)
-            layout.addWidget(cb)
+        # Single role (schema v2 has one role column, not many)
+        self.role_field = SafeComboBox()
+        self.role_field.addItems(["Estimator", "Tech", "Painter", "Mechanic", "Other"])
+        if current_roles:
+            self.role_field.setCurrentText(current_roles[0])
+        layout.addWidget(QLabel("Role:"))
+        layout.addWidget(self.role_field)
 
         # Save button
         save_btn = QPushButton("Save")
@@ -131,11 +127,12 @@ class RoleEditorDialog(QDialog):
         new_nickname = self.nickname_field.text().strip()
         Employee.set_nickname(self.emp_id, new_nickname if new_nickname else None)
 
-        # Save updated roles
-        selected_roles = [role for role, cb in self.roles.items() if cb.isChecked()]
-        Employee.set_roles(self.emp_id, selected_roles)
+        # Save role
+        selected_role = self.role_field.currentText()
+        Employee.set_role(self.emp_id, selected_role)
 
         self.accept()
+
 
 class Status_Settings(QWidget):
     def __init__(self):
@@ -210,5 +207,3 @@ class SettingsPage(QTabWidget):
         super().__init__()
         self.addTab(Employee_Settings(), "Employees")
         self.addTab(Status_Settings(), "Statuses")
-
-

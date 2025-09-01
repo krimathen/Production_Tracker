@@ -37,20 +37,11 @@ class DashboardPage(QWidget):
         with get_connection() as conn:
             cursor = conn.cursor()
 
-            # --- Stage counts in workflow order ---
+            # --- Stage counts ---
             STAGES = [
-                "Scheduled",
-                "Intake",
-                "Disassembly",
-                "Body",
-                "Refinish",
-                "Reassembly",
-                "Mechanical",
-                "Detail",
-                "QC",
-                "Delivered",
+                "Scheduled", "Intake", "Disassembly", "Body", "Refinish",
+                "Reassembly", "Mechanical", "Detail", "QC", "Delivered"
             ]
-
             cursor.execute("SELECT stage, COUNT(*) FROM repair_orders WHERE status != 'Closed' GROUP BY stage")
             raw_counts = dict(cursor.fetchall())
 
@@ -60,38 +51,20 @@ class DashboardPage(QWidget):
                 self.stage_table.setItem(r, 0, QTableWidgetItem(stage))
                 self.stage_table.setItem(r, 1, QTableWidgetItem(str(count)))
 
-            # --- Hours assigned per employee ---
-            assigned = defaultdict(lambda: defaultdict(float))
+            # --- Hours assigned per employee (from allocations) ---
             cursor.execute("""
-                           SELECT tech, painter, mechanic, body_hours, refinish_hours, mechanical_hours
-                           FROM repair_orders
-                           WHERE status != 'Closed'
-                          AND stage NOT IN ('Mechanical', 'Detail', 'QC', 'Delivered')
+                           SELECT e.full_name, e.nickname, a.role, SUM(r.hours_total * a.percent / 100.0)
+                           FROM ro_hours_allocation a
+                                    JOIN repair_orders r ON a.ro_id = r.id
+                                    JOIN employees e ON a.employee_id = e.id
+                           WHERE r.status != 'Closed'
+                           GROUP BY e.id, a.role
                            """)
-            for tech, painter, mech, body, refinish, mech_hours in cursor.fetchall():
-                if tech and tech != "Unassigned":
-                    assigned[tech]["Tech"] += body
-                if painter and painter != "Unassigned":
-                    assigned[painter]["Painter"] += refinish
-                if mech and mech != "Unassigned":
-                    assigned[mech]["Mechanic"] += mech_hours
+            rows = cursor.fetchall()
 
-            # Flatten & sort by role order (Tech → Painter → Mechanic)
-            ROLE_ORDER = {"Tech": 0, "Painter": 1, "Mechanic": 2}
-            flat_rows = []
-            for emp, roles in assigned.items():
-                for role, hours in roles.items():
-                    flat_rows.append((emp, role, hours))
-
-            flat_rows.sort(key=lambda x: (ROLE_ORDER.get(x[1], 99), x[0].lower()))
-
-            # 🔑 Build employee map: full → display
-            from utilities.employees import Employee
-            emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
-
-            self.emp_table.setRowCount(len(flat_rows))
-            for r, (emp, role, hours) in enumerate(flat_rows):
-                display_name = emp_map.get(emp, emp)  # fallback = full name
+            self.emp_table.setRowCount(len(rows))
+            for r, (full_name, nickname, role, hours) in enumerate(rows):
+                display_name = nickname or full_name
                 self.emp_table.setItem(r, 0, QTableWidgetItem(display_name))
                 self.emp_table.setItem(r, 1, QTableWidgetItem(role))
                 self.emp_table.setItem(r, 2, QTableWidgetItem(f"{hours:.2f}"))

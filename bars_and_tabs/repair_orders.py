@@ -20,30 +20,6 @@ def log_stage_change(ro_id, stage):
         )
 
 
-def log_credit(ro_number, employee, hours, note):
-    """Log credited or supplemental hours using RO number."""
-    if not employee or employee == "Unassigned" or hours == 0:
-        return
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        # ✅ Ensure the RO still exists before logging credit
-        cursor.execute("SELECT 1 FROM repair_orders WHERE ro_number=?", (ro_number,))
-        if not cursor.fetchone():
-            conn.close()
-            return  # skip if RO doesn't exist
-
-        cursor.execute("""
-            INSERT INTO credit_audit (date, ro_number, employee, hours, note)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm AP"),
-            ro_number,
-            employee,
-            hours,
-            note
-        ))
-
 # resolve full name function
 def resolve_full(role, chosen_display):
     for e in Employee.by_role(role):
@@ -247,14 +223,22 @@ class RepairOrdersPage(QWidget):
     def load_data(self):
         with get_connection() as conn:
             cursor = conn.cursor()
-            query = """SELECT id, date, ro_number, estimator, tech, painter, mechanic, stage, status
-                       FROM repair_orders
-                       WHERE 1=1"""
+            query = """SELECT r.id, \
+                              r.date, \
+                              r.ro_number, \
+                              r.estimator_id, \
+                              r.stage, \
+                              r.status,
+                              e.full_name, \
+                              e.nickname
+                       FROM repair_orders r
+                                LEFT JOIN employees e ON r.estimator_id = e.id
+                       WHERE 1 = 1"""
             params = []
 
             # --- Status filter ---
             if not self.show_closed_cb.isChecked():
-                query += " AND status != ?"
+                query += " AND r.status != ?"
                 params.append("Closed")
 
             # --- Text search filter ---
@@ -262,27 +246,25 @@ class RepairOrdersPage(QWidget):
             if text:
                 like = f"%{text}%"
                 query += """ AND (
-                    CAST(ro_number AS TEXT) LIKE ?
-                    OR estimator LIKE ?
-                    OR tech LIKE ?
-                    OR painter LIKE ?
-                    OR mechanic LIKE ?
-                    OR status LIKE ?
-                    OR stage LIKE ?
+                    CAST(r.ro_number AS TEXT) LIKE ?
+                    OR e.full_name LIKE ?
+                    OR e.nickname LIKE ?
+                    OR r.status LIKE ?
+                    OR r.stage LIKE ?
                 )"""
-                params.extend([like] * 7)
+                params.extend([like] * 5)
 
             # --- Date range filter ---
             if self.date_filter_enabled:
                 from_date = self.date_from.date()
                 to_date = self.date_to.date()
                 if from_date.isValid() and to_date.isValid():
-                    query += " AND date >= ? AND date <= ?"
+                    query += " AND r.date >= ? AND r.date <= ?"
                     params.append(from_date.toString("yyyy-MM-dd"))
                     params.append(to_date.toString("yyyy-MM-dd"))
 
             # --- Order ---
-            query += " ORDER BY ro_number"
+            query += " ORDER BY r.ro_number"
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
@@ -291,15 +273,16 @@ class RepairOrdersPage(QWidget):
         statuses = self.load_statuses()
         stages = self.load_stages()
 
-        for row_index, row in enumerate(rows):
-            ro_id, date, ro_number, estimator, tech, painter, mechanic, stage, status = row
+        for row_index, (ro_id, date, ro_number, estimator_id, stage, status, full_name, nickname) in enumerate(rows):
             date_str = QDate.fromString(date, "yyyy-MM-dd").toString("MM/dd/yyyy")
+            estimator_display = nickname or full_name or "Unassigned"
+
             self.table.setItem(row_index, 0, QTableWidgetItem(date_str))
             self.table.setItem(row_index, 1, QTableWidgetItem(str(ro_number)))
-            self.table.setItem(row_index, 2, QTableWidgetItem(estimator))
-            self.table.setItem(row_index, 3, QTableWidgetItem(tech))
-            self.table.setItem(row_index, 4, QTableWidgetItem(painter))
-            self.table.setItem(row_index, 5, QTableWidgetItem(mechanic))
+            self.table.setItem(row_index, 2, QTableWidgetItem(estimator_display))
+
+            # Placeholder for allocations summary (instead of Tech/Painter/Mech cols)
+            self.table.setItem(row_index, 3, QTableWidgetItem("See Allocations"))
 
             # Stage combobox
             stage_cb = SafeComboBox()
@@ -443,68 +426,58 @@ class RODetailDialog(QDialog):
 
         layout = QFormLayout(self)
 
-        # Date as calendar
+        # --- Core fields ---
         self.date_field = QDateEdit()
         self.date_field.setDisplayFormat("MM/dd/yyyy")
         self.date_field.setCalendarPopup(True)
 
-        # Dropdowns
-        self.estimator_field = SafeComboBox()
-        self.tech_field = SafeComboBox()
-        self.painter_field = SafeComboBox()
-        self.mechanic_field = SafeComboBox()
-
-        # Load employees dynamically by role
-        estimators = [e.nickname or e.name for e in Employee.by_role("Estimator")]
-        techs = [e.nickname or e.name for e in Employee.by_role("Tech")]
-        painters = [e.nickname or e.name for e in Employee.by_role("Painter")]
-        mechanics = [e.nickname or e.name for e in Employee.by_role("Mechanic")]
-
-        # Fill dropdowns
-        self.estimator_field.addItems(estimators)
-
-        self.tech_field.addItem("Unassigned")
-        self.tech_field.addItems(techs)
-
-        self.painter_field.addItem("Unassigned")
-        self.painter_field.addItems(painters)
-
-        self.mechanic_field.addItem("Unassigned")
-        self.mechanic_field.addItems(mechanics)
-
-        # Editable fields
         self.ro_number_field = QLineEdit()
-        self.ro_hours_field = QLineEdit()
-        self.body_hours_field = QLineEdit()
-        self.refinish_hours_field = QLineEdit()
-        self.mechanical_hours_field = QLineEdit()
 
-        # Read-only fields
+        self.estimator_field = SafeComboBox()
+        self.stage_field = SafeComboBox()
+        self.status_field = SafeComboBox()
+
+        self.ro_hours_field = QLineEdit()
         self.hours_taken_field = QLineEdit()
         self.hours_taken_field.setReadOnly(True)
         self.hours_remaining_field = QLineEdit()
         self.hours_remaining_field.setReadOnly(True)
 
-        self.stage_field = SafeComboBox()
-        self.status_field = SafeComboBox()
-        self.stage_field.addItems(["Intake", "In Progress", "Completed"])
+        # Fill dropdowns
+        estimators = [e.nickname or e.name for e in Employee.by_role("Estimator")]
+        self.estimator_field.addItems(estimators)
+        self.stage_field.addItems([
+            "Scheduled", "Intake", "Disassembly", "Body", "Refinish",
+            "Reassembly", "Mechanical", "Detail", "QC", "Delivered"
+        ])
         self.status_field.addItems(["Open", "On Hold", "Closed"])
 
-        # Add to layout
+        # Layout
         layout.addRow("Date:", self.date_field)
         layout.addRow("RO Number:", self.ro_number_field)
         layout.addRow("Estimator:", self.estimator_field)
-        layout.addRow("Tech:", self.tech_field)
-        layout.addRow("Painter:", self.painter_field)
-        layout.addRow("Mechanic:", self.mechanic_field)
         layout.addRow("RO Hours:", self.ro_hours_field)
-        layout.addRow("Body Hours:", self.body_hours_field)
-        layout.addRow("Refinish Hours:", self.refinish_hours_field)
-        layout.addRow("Mechanical Hours:", self.mechanical_hours_field)
         layout.addRow("Hours Taken:", self.hours_taken_field)
         layout.addRow("Hours Remaining:", self.hours_remaining_field)
         layout.addRow("Stage:", self.stage_field)
         layout.addRow("Status:", self.status_field)
+
+        # --- Allocations subtable ---
+        self.alloc_table = QTableWidget()
+        self.alloc_table.setColumnCount(3)
+        self.alloc_table.setHorizontalHeaderLabels(["Employee", "Role", "Percent"])
+        self.alloc_table.setAlternatingRowColors(True)
+        layout.addRow(QLabel("Allocations:"), self.alloc_table)
+
+        alloc_btns = QHBoxLayout()
+        self.add_alloc_btn = QPushButton("Add Allocation")
+        self.del_alloc_btn = QPushButton("Remove Allocation")
+        alloc_btns.addWidget(self.add_alloc_btn)
+        alloc_btns.addWidget(self.del_alloc_btn)
+        layout.addRow(alloc_btns)
+
+        self.add_alloc_btn.clicked.connect(self.add_allocation_row)
+        self.del_alloc_btn.clicked.connect(self.remove_selected_allocation)
 
         # Save button
         save_btn = QPushButton("Save")
@@ -513,124 +486,111 @@ class RODetailDialog(QDialog):
 
         self.setLayout(layout)
         self.load_data()
+        self.load_allocations()
 
+    # --- Data loaders ---
     def load_data(self):
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT date, ro_number, estimator, tech, painter, mechanic,
-                             ro_hours, body_hours, refinish_hours, mechanical_hours,
-                             hours_taken, hours_remaining, stage, status
+            cursor.execute("""
+                SELECT date, ro_number, estimator_id, ro_hours,
+                       hours_taken, hours_remaining, stage, status
                 FROM repair_orders WHERE id = ?
-                """,
-                (self.ro_id,),
-            )
+            """, (self.ro_id,))
             row = cursor.fetchone()
 
         if row:
-            (
-                date, ro_number, estimator, tech, painter, mechanic,
-                ro_hours, body_hours, refinish_hours, mechanical_hours,
-                hours_taken, hours_remaining, stage, status
-            ) = row
-
+            date, ro_number, estimator_id, ro_hours, hours_taken, hours_remaining, stage, status = row
             self.date_field.setDate(QDate.fromString(date, "yyyy-MM-dd"))
             self.ro_number_field.setText(str(ro_number))
-            self.estimator_field.setCurrentText(estimator)
-            self.tech_field.setCurrentText(tech)
-            self.painter_field.setCurrentText(painter)
-            self.mechanic_field.setCurrentText(mechanic)
+            if estimator_id:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT full_name, nickname FROM employees WHERE id=?", (estimator_id,))
+                    emp = cur.fetchone()
+                    if emp:
+                        self.estimator_field.setCurrentText(emp[1] or emp[0])
             self.ro_hours_field.setText(f"{ro_hours:.1f}")
-            self.body_hours_field.setText(f"{body_hours:.1f}")
-            self.refinish_hours_field.setText(f"{refinish_hours:.1f}")
-            self.mechanical_hours_field.setText(f"{mechanical_hours:.1f}")
             self.hours_taken_field.setText(f"{hours_taken:.1f}")
             self.hours_remaining_field.setText(f"{hours_remaining:.1f}")
             self.stage_field.setCurrentText(stage)
             self.status_field.setCurrentText(status)
 
+    def load_allocations(self):
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT e.full_name, e.nickname, a.role, a.percent
+                FROM ro_hours_allocation a
+                JOIN employees e ON a.employee_id = e.id
+                WHERE a.ro_id=?
+            """, (self.ro_id,))
+            rows = cur.fetchall()
+
+        self.alloc_table.setRowCount(len(rows))
+        for r, (full_name, nickname, role, percent) in enumerate(rows):
+            display = nickname or full_name
+            self.alloc_table.setItem(r, 0, QTableWidgetItem(display))
+            self.alloc_table.setItem(r, 1, QTableWidgetItem(role))
+            self.alloc_table.setItem(r, 2, QTableWidgetItem(f"{percent:.1f}"))
+
+    # --- Allocation controls ---
+    def add_allocation_row(self):
+        r = self.alloc_table.rowCount()
+        self.alloc_table.insertRow(r)
+        self.alloc_table.setItem(r, 0, QTableWidgetItem("Select Employee"))
+        self.alloc_table.setItem(r, 1, QTableWidgetItem("Role"))
+        self.alloc_table.setItem(r, 2, QTableWidgetItem("0"))
+
+    def remove_selected_allocation(self):
+        selected = self.alloc_table.selectionModel().selectedRows()
+        for idx in sorted(selected, reverse=True):
+            self.alloc_table.removeRow(idx.row())
+
+    # --- Save changes ---
     def save_changes(self):
         with get_connection() as conn:
             cursor = conn.cursor()
 
-            # --- Get current hours + stage before update ---
-            cursor.execute(
-                "SELECT body_hours, refinish_hours, mechanical_hours, stage FROM repair_orders WHERE id=?",
-                (self.ro_id,))
-            old_body, old_refinish, old_mech, current_stage = cursor.fetchone()
+            # Update RO
+            est_name = self.estimator_field.currentText()
+            cursor.execute("SELECT id FROM employees WHERE full_name=? OR nickname=?", (est_name, est_name))
+            est_match = cursor.fetchone()
+            estimator_id = est_match[0] if est_match else None
 
-            new_body = float(self.body_hours_field.text() or 0)
-            new_refinish = float(self.refinish_hours_field.text() or 0)
-            new_mech = float(self.mechanical_hours_field.text() or 0)
-
-            # --- Fetch ro_number for credit logging ---
-            cursor.execute("SELECT ro_number FROM repair_orders WHERE id=?", (self.ro_id,))
-            (ro_number,) = cursor.fetchone()
-
-            # --- Stage gating rules (only allow beyond Intake/Scheduled) ---
-            if current_stage not in ("Scheduled", "Intake"):
-                # Body hours
-                if new_body != old_body:
-                    if old_body > 0:  # only supplemental if baseline already exists
-                        log_credit(ro_number, self.tech_field.currentText(),
-                                   new_body - old_body,
-                                   f"Body hours adjusted {old_body} → {new_body}")
-
-                # Refinish hours
-                if new_refinish != old_refinish:
-                    if old_refinish > 0:  # supplemental only
-                        log_credit(ro_number, self.painter_field.currentText(),
-                                   new_refinish - old_refinish,
-                                   f"Refinish hours adjusted {old_refinish} → {new_refinish}")
-
-                # Mechanical hours
-                if new_mech != old_mech:
-                    if old_mech > 0:  # supplemental only
-                        log_credit(ro_number, self.mechanic_field.currentText(),
-                                   new_mech - old_mech,
-                                   f"Mechanical hours adjusted {old_mech} → {new_mech}")
-
-            estimator_full = resolve_full("Estimator", self.estimator_field.currentText())
-            tech_full = resolve_full("Tech", self.tech_field.currentText())
-            painter_full = resolve_full("Painter", self.painter_field.currentText())
-            mech_full = resolve_full("Mechanic", self.mechanic_field.currentText())
-
-            # --- Update repair order record ---
-            cursor.execute(
-                """
+            cursor.execute("""
                 UPDATE repair_orders
-                SET date=?,
-                    ro_number=?,
-                    estimator=?,
-                    tech=?,
-                    painter=?,
-                    mechanic=?,
-                    ro_hours=?,
-                    body_hours=?,
-                    refinish_hours=?,
-                    mechanical_hours=?,
-                    stage=?,
-                    status=?
-                WHERE id = ?
-                """,
-                (
-                    self.date_field.date().toString("yyyy-MM-dd"),
-                    int(self.ro_number_field.text()),
-                    estimator_full,
-                    tech_full or "Unassigned",
-                    painter_full or "Unassigned",
-                    mech_full or "Unassigned",
-                    float(self.ro_hours_field.text() or 0),
-                    new_body,
-                    new_refinish,
-                    new_mech,
-                    self.stage_field.currentText(),
-                    self.status_field.currentText(),
-                    self.ro_id,
-                ),
-            )
+                SET date=?, ro_number=?, estimator_id=?, ro_hours=?,
+                    stage=?, status=?
+                WHERE id=?
+            """, (
+                self.date_field.date().toString("yyyy-MM-dd"),
+                int(self.ro_number_field.text()),
+                estimator_id,
+                float(self.ro_hours_field.text() or 0),
+                self.stage_field.currentText(),
+                self.status_field.currentText(),
+                self.ro_id,
+            ))
 
+            # Update allocations
+            cursor.execute("DELETE FROM ro_hours_allocation WHERE ro_id=?", (self.ro_id,))
+            for r in range(self.alloc_table.rowCount()):
+                emp_name = self.alloc_table.item(r, 0).text().strip()
+                role = self.alloc_table.item(r, 1).text().strip()
+                percent = float(self.alloc_table.item(r, 2).text() or 0)
+
+                cur2 = conn.cursor()
+                cur2.execute("SELECT id FROM employees WHERE full_name=? OR nickname=?", (emp_name, emp_name))
+                match = cur2.fetchone()
+                if not match:
+                    continue
+                (emp_id,) = match
+
+                cursor.execute("""
+                    INSERT INTO ro_hours_allocation (ro_id, employee_id, role, percent)
+                    VALUES (?, ?, ?, ?)
+                """, (self.ro_id, emp_id, role, percent))
 
         log_stage_change(self.ro_id, self.stage_field.currentText())
         update_ro_hours(self.ro_id)
@@ -639,135 +599,131 @@ class RODetailDialog(QDialog):
 
 
 # ---------- Helpers ------------
-def safe_log_credit(ro_number, employee, hours, note):
+# --- Credit helpers ---
+def log_credit(ro_number, employee_id, hours, note):
+    """Log credited or supplemental hours by employee_id."""
+    if not employee_id or hours == 0:
+        return
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # ✅ Ensure the RO still exists before logging credit
+        cursor.execute("SELECT 1 FROM repair_orders WHERE ro_number=?", (ro_number,))
+        if not cursor.fetchone():
+            return  # skip if RO doesn't exist
+
+        cursor.execute("""
+            INSERT INTO credit_audit (date, ro_number, employee_id, hours, note)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm AP"),
+            ro_number,
+            employee_id,
+            hours,
+            note
+        ))
+
+
+def safe_log_credit(ro_number, employee_id, hours, note):
     """Insert credit only if it doesn't already exist for this RO/employee/note."""
-    if not employee or employee == "Unassigned" or hours == 0:
+    if not employee_id or hours == 0:
         return
 
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT 1 FROM credit_audit
-            WHERE ro_number=? AND employee=? AND note=?
-        """, (ro_number, employee, note))
-        exists = cursor.fetchone()
-        if not exists:
+            WHERE ro_number=? AND employee_id=? AND note=?
+        """, (ro_number, employee_id, note))
+        if not cursor.fetchone():
             cursor.execute("""
-                INSERT INTO credit_audit (date, ro_number, employee, hours, note)
+                INSERT INTO credit_audit (date, ro_number, employee_id, hours, note)
                 VALUES (?, ?, ?, ?, ?)
             """, (
-                QDateTime.currentDateTime().toString("MM/dd/yyyy hh:mm AP"),
-                ro_number, employee, hours, note
+                QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm AP"),
+                ro_number, employee_id, hours, note
             ))
 
 
 def update_ro_hours(ro_id):
-    """Recalculate and credit hours as RO moves through phases, idempotently."""
+    """Recalculate and credit hours based on allocations + stage history."""
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        cursor.execute(
-            "SELECT ro_number, tech, painter, mechanic, ro_hours, body_hours, refinish_hours, mechanical_hours FROM repair_orders WHERE id=?",
-            (ro_id,))
+        # RO basics
+        cursor.execute("SELECT ro_number, ro_hours FROM repair_orders WHERE id=?", (ro_id,))
         row = cursor.fetchone()
         if not row:
-            conn.close()
             return
+        ro_number, ro_hours = row
 
-        ro_number, tech, painter, mech, ro_hours, body, refinish, mechanical = row
-
-        # Get stage history
+        # Stage history → find furthest stage
         cursor.execute("SELECT stage FROM ro_stage_history WHERE ro_id=? ORDER BY id", (ro_id,))
         stages = [s[0] for s in cursor.fetchall()]
+        if not stages:
+            return
 
         STAGES = [
             "Scheduled", "Intake", "Disassembly", "Body", "Refinish",
             "Reassembly", "Mechanical", "Detail", "QC", "Delivered"
         ]
         stage_order = {name: idx for idx, name in enumerate(STAGES)}
-        indices = [stage_order[s] for s in stages if s in stage_order]
+        furthest_idx = max(stage_order[s] for s in stages if s in stage_order)
+
+        # Allocations for this RO
+        cursor.execute("""
+            SELECT employee_id, phase, fraction, hours
+            FROM ro_hours_allocation
+            WHERE ro_id=?
+        """, (ro_id,))
+        allocations = cursor.fetchall()
 
         taken = 0.0
-        if indices:
-            furthest_idx = max(indices)
-
-            # --- Tech credits ---
-            if furthest_idx > stage_order["Body"] and body > 0:
-                if tech and tech != "Unassigned":
-                    hours = body * 0.6
-                    taken += hours
-                    safe_log_credit(ro_number, tech, hours, "Body phase completed (60%)")
-
-            if furthest_idx > stage_order["Reassembly"] and body > 0:
-                if tech and tech != "Unassigned":
-                    hours = body * 0.4
-                    taken += hours
-                    safe_log_credit(ro_number, tech, hours, "Reassembly phase completed (40%)")
-
-            # --- Painter credits ---
-            if furthest_idx > stage_order["Refinish"] and refinish > 0:
-                if painter and painter != "Unassigned":
-                    hours = refinish
-                    taken += hours
-                    safe_log_credit(ro_number, painter, hours, "Refinish phase completed")
-
-            # --- Mechanic credits ---
-            if furthest_idx > stage_order["Mechanical"] and mechanical > 0:
-                if mech and mech != "Unassigned":
-                    hours = mechanical
-                    taken += hours
-                    safe_log_credit(ro_number, mech, hours, "Mechanical phase completed")
+        for emp_id, phase, fraction, hours in allocations:
+            if phase not in stage_order:
+                continue
+            if furthest_idx > stage_order[phase]:
+                credit_hours = hours if hours else ro_hours * fraction
+                taken += credit_hours
+                safe_log_credit(ro_number, emp_id, credit_hours, f"{phase} phase completed")
 
         remaining = max(ro_hours - taken, 0.0)
-
-        # Update RO record
-        cursor.execute(
-            "UPDATE repair_orders SET hours_taken=?, hours_remaining=? WHERE id=?",
-            (taken, remaining, ro_id)
-        )
+        cursor.execute("UPDATE repair_orders SET hours_taken=?, hours_remaining=? WHERE id=?",
+                       (taken, remaining, ro_id))
 
 
 def apply_uncredited_hours(ro_id):
-    """When closing an RO, reconcile credits so totals reflect any adjustments (adds or subtracts)."""
+    """On RO close, reconcile credits with allocation totals."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT ro_number, body_hours, refinish_hours, mechanical_hours,
-                   tech, painter, mechanic
-            FROM repair_orders WHERE id=?
-        """, (ro_id,))
+        cursor.execute("SELECT ro_number, ro_hours FROM repair_orders WHERE id=?", (ro_id,))
         row = cursor.fetchone()
         if not row:
-            conn.close()
             return
+        ro_number, ro_hours = row
 
-        (ro_number, body, refinish, mechanical,
-         tech, painter, mech) = row
-
-        # Expected totals per role
-        expected = {}
-        if tech and tech != "Unassigned":
-            expected[tech] = expected.get(tech, 0) + body
-        if painter and painter != "Unassigned":
-            expected[painter] = expected.get(painter, 0) + refinish
-        if mech and mech != "Unassigned":
-            expected[mech] = expected.get(mech, 0) + mechanical
-
-        # Already credited totals per role (for this RO only)
+        # Expected allocations
         cursor.execute("""
-            SELECT employee, SUM(hours) FROM credit_audit
-            WHERE ro_number=?
-            GROUP BY employee
-        """, (ro_number,))
-        credited_map = {emp: hrs for emp, hrs in cursor.fetchall()}
+            SELECT employee_id, SUM(COALESCE(hours, ro_hours * fraction))
+            FROM ro_hours_allocation
+            WHERE ro_id=?
+            GROUP BY employee_id
+        """, (ro_id,))
+        expected = {emp: hrs for emp, hrs in cursor.fetchall()}
 
-        # Reconcile for each role
-        for emp, exp_total in expected.items():
-            credited = credited_map.get(emp, 0)
-            diff = exp_total - credited
-            if diff != 0:
-                # diff can be positive (add hours) or negative (reduce hours)
-                note = "Adjustment on close (recalc)"
-                log_credit(ro_number, emp, diff, note)
+        # Already credited
+        cursor.execute("""
+            SELECT employee_id, SUM(hours) FROM credit_audit
+            WHERE ro_number=?
+            GROUP BY employee_id
+        """, (ro_number,))
+        credited = {emp: hrs for emp, hrs in cursor.fetchall()}
+
+        # Reconcile
+        for emp_id, exp_total in expected.items():
+            credited_total = credited.get(emp_id, 0)
+            diff = exp_total - credited_total
+            if abs(diff) > 0.01:  # tolerance for float math
+                log_credit(ro_number, emp_id, diff, "Adjustment on close (recalc)")
 
 

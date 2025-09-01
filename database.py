@@ -74,192 +74,206 @@ def migrate_dates():
         conn.commit()
     print("✅ Migrated all dates to ISO (yyyy-MM-dd)")
 
+
 def migrate_db():
-    """Run schema migrations safely without dropping existing data."""
+    """Flattened baseline migration for v2.0 (schema_version 200)."""
     conn = get_connection()
     cursor = conn.cursor()
 
     # Ensure schema_version table exists
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER NOT NULL
-        )
+        CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)
     """)
+    row = cursor.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
 
-    cursor.execute("SELECT version FROM schema_version LIMIT 1")
-    row = cursor.fetchone()
-    if row is None:
-        cursor.execute("INSERT INTO schema_version (version) VALUES (1)")
-        version = 1
-    else:
+    if row:
         version = row[0]
+    else:
+        # Brand-new DB (already v2 from initialize_db)
+        cursor.execute("INSERT INTO schema_version (version) VALUES (200)")
+        version = 200
 
-    # v1 → v2: add start_time / end_time to employee_hours
-    if version < 2:
-        for col in ("start_time", "end_time"):
-            try:
-                cursor.execute(f"ALTER TABLE employee_hours ADD COLUMN {col} TEXT")
-            except sqlite3.OperationalError:
-                pass
-        cursor.execute("UPDATE schema_version SET version=2")
-        print("✅ Migrated DB to version 2")
-
-    # v2 → v3: add order_index to settings_stages
-    if version < 3:
-        try:
-            cursor.execute("ALTER TABLE settings_stages ADD COLUMN order_index INTEGER")
-        except sqlite3.OperationalError:
-            pass
-        cursor.execute("SELECT id FROM settings_stages ORDER BY name")
-        rows = cursor.fetchall()
-        for idx, (sid,) in enumerate(rows, start=1):
-            cursor.execute("UPDATE settings_stages SET order_index=? WHERE id=?", (idx, sid))
-        cursor.execute("UPDATE schema_version SET version=3")
-        print("✅ Migrated DB to version 3")
-
-    # v3 → v4: ensure credit_audit has ro_number
-    if version < 4:
-        cursor.execute("PRAGMA table_info(credit_audit)")
-        cols = [c[1] for c in cursor.fetchall()]
-        if "ro_number" not in cols:
-            cursor.execute("ALTER TABLE credit_audit ADD COLUMN ro_number INTEGER")
-        cursor.execute("UPDATE schema_version SET version=4")
-        print("✅ Migrated DB to version 4")
-
-    # v4 → v5: enforce UNIQUE on repair_orders.ro_number
-    if version < 5:
-        cursor.execute("PRAGMA index_list(repair_orders)")
-        indexes = [i[1] for i in cursor.fetchall()]
-        if "idx_ro_number_unique" not in indexes:
-            cursor.execute("CREATE UNIQUE INDEX idx_ro_number_unique ON repair_orders(ro_number)")
-        cursor.execute("UPDATE schema_version SET version=5")
-        print("✅ Migrated DB to version 5")
-
-    if version < 6:
-        cursor.execute("PRAGMA table_info(employees)")
-        cols = [c[1] for c in cursor.fetchall()]
-        if "nickname" not in cols:
-            cursor.execute("ALTER TABLE employees ADD COLUMN nickname TEXT")
-
-        # backup db first
+    if version < 200:
+        # --- Backup old DB ---
         db_path = get_db_path()
-        shutil.copy(db_path, db_path.with_name("app_backup_before_v6.db"))
+        backup_path = db_path.with_name(f"{db_path.stem}_before_v2.db")
+        if not backup_path.exists():
+            import shutil
+            shutil.copy(db_path, backup_path)
+            print(f"💾 Backup created at {backup_path}")
 
-        # Run Qt dialogs if app context exists
-        app = QApplication.instance() or QApplication(sys.argv)
-
-        cursor.execute("SELECT id, name, nickname FROM employees")
-        rows = cursor.fetchall()
-        for emp_id, current_name, current_nickname in rows:
-            if current_nickname:
+        # --- Drop existing tables (we’ll rebuild) ---
+        existing_tables = cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        for (t,) in existing_tables:
+            if t in ("schema_version",) or t.startswith("sqlite_"):
                 continue
-            if " " not in current_name.strip():
-                from utilities.migration_dialogue import NameMigrationDialog
-                dlg = NameMigrationDialog(current_name)
-                if dlg.exec() and dlg.full_name:
-                    full_name = dlg.full_name.strip()
+            cursor.execute(f"DROP TABLE IF EXISTS {t}")
 
-                    # Update employee record
-                    cursor.execute(
-                        "UPDATE employees SET name=?, nickname=? WHERE id=?",
-                        (full_name, current_name, emp_id)
-                    )
+        # --- Create clean v2 schema ---
+        cursor.executescript("""
+        CREATE TABLE employees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            nickname TEXT,
+            role TEXT
+        );
 
-                    # Cascade into dependent tables
-                    cursor.execute(
-                        "UPDATE employee_hours SET employee=? WHERE employee=?",
-                        (full_name, current_name)
-                    )
-                    cursor.execute(
-                        "UPDATE credit_audit SET employee=? WHERE employee=?",
-                        (full_name, current_name)
-                    )
+        CREATE TABLE repair_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_number INTEGER NOT NULL UNIQUE,
+            date TEXT NOT NULL,
+            estimator_id INTEGER,
+            stage TEXT NOT NULL DEFAULT 'Intake',
+            status TEXT NOT NULL DEFAULT 'Open',
+            hours_total REAL,
+            hours_body REAL,
+            hours_refinish REAL,
+            hours_mechanical REAL,
+            hours_taken REAL,
+            hours_remaining REAL,
+            FOREIGN KEY (estimator_id) REFERENCES employees(id)
+        );
 
-                    print(f"→ Migrated {current_name} → {full_name} (nickname preserved)")
+        CREATE TABLE ro_hours_allocation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            percent REAL NOT NULL,
+            FOREIGN KEY (ro_id) REFERENCES repair_orders(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_ro_hours_allocation_ro ON ro_hours_allocation(ro_id);
 
-        cursor.execute("UPDATE schema_version SET version=6")
-        print("✅ Migrated DB to version 6 (GUI nickname migration + cascade)")
+        CREATE TABLE employee_hours (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            start_time TEXT,
+            end_time TEXT,
+            hours_worked REAL,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE credit_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            hours REAL NOT NULL,
+            note TEXT,
+            FOREIGN KEY (ro_id) REFERENCES repair_orders(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE ro_stage_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_id INTEGER NOT NULL,
+            stage TEXT NOT NULL,
+            date TEXT NOT NULL,
+            FOREIGN KEY (ro_id) REFERENCES repair_orders(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE settings_stages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            order_index INTEGER
+        );
+
+        CREATE TABLE settings_statuses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
+        """)
+
+        # --- Bump schema version ---
+        cursor.execute("DELETE FROM schema_version")
+        cursor.execute("INSERT INTO schema_version (version) VALUES (200)")
+        print("✅ Migrated DB to version 200 (v2.0 baseline)")
 
     conn.commit()
     conn.close()
 
 
-
 EXPECTED_COLUMNS = [
     ("id", "INTEGER"),
-    ("date", "TEXT"),
     ("ro_number", "INTEGER"),
-    ("estimator", "TEXT"),
-    ("tech", "TEXT"),
-    ("painter", "TEXT"),
-    ("mechanic", "TEXT"),
-    ("ro_hours", "REAL"),
-    ("body_hours", "REAL"),
-    ("refinish_hours", "REAL"),
-    ("mechanical_hours", "REAL"),
-    ("hours_taken", "REAL"),
-    ("hours_remaining", "REAL"),
+    ("date", "TEXT"),
+    ("estimator_id", "INTEGER"),
     ("stage", "TEXT"),
     ("status", "TEXT"),
+    ("hours_total", "REAL"),
+    ("hours_body", "REAL"),
+    ("hours_refinish", "REAL"),
+    ("hours_mechanical", "REAL"),
+    ("hours_taken", "REAL"),
+    ("hours_remaining", "REAL"),
 ]
 
 def initialize_db():
-    """Create tables if they don’t exist yet, and check schema."""
+    """Create tables if they don’t exist yet, and check schema (v2 baseline)."""
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Create table if missing
     cursor.executescript(
         """
-        CREATE TABLE IF NOT EXISTS repair_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            ro_number INTEGER NOT NULL UNIQUE,
-            estimator TEXT NOT NULL,
-            tech TEXT NOT NULL,
-            painter TEXT NOT NULL,
-            mechanic TEXT NOT NULL,
-            ro_hours REAL NOT NULL,
-            body_hours REAL NOT NULL,
-            refinish_hours REAL NOT NULL,
-            mechanical_hours REAL NOT NULL,
-            hours_taken REAL NOT NULL,
-            hours_remaining REAL NOT NULL,
-            stage  TEXT NOT NULL DEFAULT 'Instake',
-            status TEXT NOT NULL DEFAULT 'Open'
-        );
-            
         CREATE TABLE IF NOT EXISTS employees (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL
+            full_name TEXT NOT NULL,
+            nickname TEXT,
+            role TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS employee_roles (
+        CREATE TABLE IF NOT EXISTS repair_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_number INTEGER NOT NULL UNIQUE,
+            date TEXT NOT NULL,
+            estimator_id INTEGER,
+            stage TEXT NOT NULL DEFAULT 'Intake',
+            status TEXT NOT NULL DEFAULT 'Open',
+            hours_total REAL,
+            hours_body REAL,
+            hours_refinish REAL,
+            hours_mechanical REAL,
+            hours_taken REAL,
+            hours_remaining REAL,
+            FOREIGN KEY (estimator_id) REFERENCES employees(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS ro_hours_allocation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_id INTEGER NOT NULL,
             employee_id INTEGER NOT NULL,
             role TEXT NOT NULL,
-            FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+            percent REAL NOT NULL,
+            FOREIGN KEY (ro_id) REFERENCES repair_orders(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
         );
-        CREATE TABLE IF NOT EXISTS settings_statuses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL
-        );
+        CREATE INDEX IF NOT EXISTS idx_ro_hours_allocation_ro ON ro_hours_allocation(ro_id);
 
-        CREATE TABLE IF NOT EXISTS settings_stages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            order_index INTEGER NOT NULL
-        );
-        
         CREATE TABLE IF NOT EXISTS employee_hours (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
             date TEXT NOT NULL,
-            employee TEXT NOT NULL,
-            start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            hours_worked REAL NOT NULL
+            start_time TEXT,
+            end_time TEXT,
+            hours_worked REAL,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
         );
-        
+
+        CREATE TABLE IF NOT EXISTS credit_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ro_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            hours REAL NOT NULL,
+            note TEXT,
+            FOREIGN KEY (ro_id) REFERENCES repair_orders(id) ON DELETE CASCADE,
+            FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_credit_ro ON credit_audit(ro_id);
+        CREATE INDEX IF NOT EXISTS idx_credit_emp ON credit_audit(employee_id);
+
         CREATE TABLE IF NOT EXISTS ro_stage_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ro_id INTEGER NOT NULL,
@@ -267,25 +281,24 @@ def initialize_db():
             date TEXT NOT NULL,
             FOREIGN KEY (ro_id) REFERENCES repair_orders(id) ON DELETE CASCADE
         );
-            
-        CREATE TABLE IF NOT EXISTS credit_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ro_number INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            employee TEXT NOT NULL,
-            hours REAL NOT NULL,
-            note TEXT,
-            FOREIGN KEY (ro_number) REFERENCES repair_orders(ro_number) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_credit_ro ON credit_audit(ro_number);
 
+        CREATE TABLE IF NOT EXISTS settings_stages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            order_index INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS settings_statuses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        );
         """
     )
 
-    # Check schema
+    # Check schema of repair_orders against v2 expected
     cursor.execute("PRAGMA table_info(repair_orders)")
     cols = cursor.fetchall()
-    existing = [(c[1], c[2].upper()) for c in cols]  # (name, type)
+    existing = [(c[1], c[2].upper()) for c in cols]
 
     if existing != EXPECTED_COLUMNS:
         print("⚠️ Database schema mismatch!")
@@ -295,4 +308,6 @@ def initialize_db():
 
     conn.commit()
     conn.close()
+
+
 

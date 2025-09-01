@@ -7,7 +7,9 @@ def main():
     initialize_db()
     migrate_db()
     migrate_dates()
+
     app = QApplication(sys.argv)
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

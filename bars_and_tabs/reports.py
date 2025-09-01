@@ -1,6 +1,4 @@
-
 import csv
-
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QTableWidget, QLabel, QTabWidget, QDateEdit,
     QTableWidgetItem, QFileDialog, QMessageBox, QHBoxLayout, QAbstractItemView
@@ -9,6 +7,7 @@ from PySide6.QtCore import Qt, QDate
 from datetime import datetime
 from database import get_connection
 from key_bindings import add_refresh_shortcut
+
 
 class SafeDateEdit(QDateEdit):
     """QDateEdit that ignores mouse wheel events to prevent accidental changes."""
@@ -24,9 +23,11 @@ class EmployeeHoursTab(QWidget):
         # --- Top buttons ---
         btn_layout = QHBoxLayout()
         self.import_btn = QPushButton("Import CSV")
+        self.import_pdf_btn = QPushButton("Import PDF")
         self.save_btn = QPushButton("Save Changes")
         self.delete_btn = QPushButton("Delete Selected")
         btn_layout.addWidget(self.import_btn)
+        btn_layout.addWidget(self.import_pdf_btn)
         btn_layout.addWidget(self.save_btn)
         btn_layout.addWidget(self.delete_btn)
         layout.addLayout(btn_layout)
@@ -43,6 +44,7 @@ class EmployeeHoursTab(QWidget):
 
         # Signals
         self.import_btn.clicked.connect(self.import_csv)
+        self.import_pdf_btn.clicked.connect(self.import_pdf)
         self.save_btn.clicked.connect(self.save_changes)
         self.delete_btn.clicked.connect(self.delete_selected)
 
@@ -61,7 +63,7 @@ class EmployeeHoursTab(QWidget):
                     reader = csv.DictReader(f)
                     for row in reader:
                         date = row["Date"].strip()
-                        employee = row["Name"].strip()
+                        emp_name = row["Name"].strip()
                         start = row["Start"].strip()
                         end = row["End"].strip()
                         try:
@@ -70,9 +72,15 @@ class EmployeeHoursTab(QWidget):
                             hours = (t2 - t1).seconds / 3600.0
                         except Exception:
                             hours = 0.0
+                        # Resolve employee_id
+                        cursor.execute("SELECT id FROM employees WHERE full_name=? OR nickname=?", (emp_name, emp_name))
+                        match = cursor.fetchone()
+                        if not match:
+                            continue
+                        (emp_id,) = match
                         cursor.execute(
-                            "INSERT INTO employee_hours (date, employee, start_time, end_time, hours_worked) VALUES (?, ?, ?, ?, ?)",
-                            (date, employee, start, end, hours),
+                            "INSERT INTO employee_hours (employee_id, date, start_time, end_time, hours_worked) VALUES (?, ?, ?, ?, ?)",
+                            (emp_id, date, start, end, hours),
                         )
 
             QMessageBox.information(self, "Import Successful", "CSV data imported successfully.")
@@ -80,24 +88,36 @@ class EmployeeHoursTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import CSV:\n{e}")
 
-    def load_data(self):
-        from utilities.employees import Employee
-        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
+    def import_pdf(self):
+        from utilities.pdf_to_csv import pdf_to_csv
+        pdf_path, _ = QFileDialog.getOpenFileName(self, "Import PDF", "", "PDF Files (*.pdf)")
+        if not pdf_path:
+            return
+        csv_path = pdf_path.replace(".pdf", ".csv")
+        pdf_to_csv(pdf_path, csv_path)
+        QMessageBox.information(self, "Converted", f"PDF converted to {csv_path}. Now import it via Import CSV.")
 
+
+    def load_data(self):
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, date, employee, start_time, end_time, hours_worked FROM employee_hours ORDER BY date")
+            cursor.execute("""
+                SELECT h.id, h.date, e.full_name, e.nickname, h.start_time, h.end_time, h.hours_worked
+                FROM employee_hours h
+                JOIN employees e ON h.employee_id = e.id
+                ORDER BY h.date
+            """)
             rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
         self.ids = []
-        for r, (row_id, date, employee, start, end, hours) in enumerate(rows):
+        for r, (row_id, date, full_name, nickname, start, end, hours) in enumerate(rows):
             self.ids.append(row_id)
-            display_name = emp_map.get(employee, employee)
+            display_name = nickname or full_name
             self.table.setItem(r, 0, QTableWidgetItem(date))
             self.table.setItem(r, 1, QTableWidgetItem(display_name))
-            self.table.setItem(r, 2, QTableWidgetItem(start))
-            self.table.setItem(r, 3, QTableWidgetItem(end))
+            self.table.setItem(r, 2, QTableWidgetItem(start or ""))
+            self.table.setItem(r, 3, QTableWidgetItem(end or ""))
             self.table.setItem(r, 4, QTableWidgetItem(f"{hours:.2f}"))
 
     def save_changes(self):
@@ -105,7 +125,7 @@ class EmployeeHoursTab(QWidget):
             cursor = conn.cursor()
             for r, row_id in enumerate(self.ids):
                 date = self.table.item(r, 0).text()
-                employee = self.table.item(r, 1).text()
+                emp_name = self.table.item(r, 1).text()
                 start = self.table.item(r, 2).text()
                 end = self.table.item(r, 3).text()
                 try:
@@ -117,9 +137,15 @@ class EmployeeHoursTab(QWidget):
                         hours = float(self.table.item(r, 4).text())
                     except Exception:
                         hours = 0.0
+                # Resolve employee_id
+                cursor.execute("SELECT id FROM employees WHERE full_name=? OR nickname=?", (emp_name, emp_name))
+                match = cursor.fetchone()
+                if not match:
+                    continue
+                (emp_id,) = match
                 cursor.execute(
-                    "UPDATE employee_hours SET date=?, employee=?, start_time=?, end_time=?, hours_worked=? WHERE id=?",
-                    (date, employee, start, end, hours, row_id),
+                    "UPDATE employee_hours SET date=?, employee_id=?, start_time=?, end_time=?, hours_worked=? WHERE id=?",
+                    (date, emp_id, start, end, hours, row_id),
                 )
 
         QMessageBox.information(self, "Saved", "Changes saved to database.")
@@ -161,17 +187,19 @@ class CreditedHoursTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        from utilities.employees import Employee
-        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
-
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
+            cursor.execute("""
+                SELECT e.full_name, e.nickname, SUM(c.hours)
+                FROM credit_audit c
+                JOIN employees e ON c.employee_id = e.id
+                GROUP BY e.id
+            """)
             rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
-        for r, (emp, hrs) in enumerate(rows):
-            display_name = emp_map.get(emp, emp)
+        for r, (full_name, nickname, hrs) in enumerate(rows):
+            display_name = nickname or full_name
             self.table.setItem(r, 0, QTableWidgetItem(display_name))
             self.table.setItem(r, 1, QTableWidgetItem(f"{hrs:.2f}"))
 
@@ -193,24 +221,34 @@ class EfficiencyTab(QWidget):
         self.load_data()
 
     def load_data(self):
-        from utilities.employees import Employee
-        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
-
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT employee, SUM(hours_worked) FROM employee_hours GROUP BY employee")
-            worked_map = {emp: total or 0 for emp, total in cursor.fetchall()}
 
-            cursor.execute("SELECT employee, SUM(hours) FROM credit_audit GROUP BY employee")
-            credits_map = {emp: total or 0 for emp, total in cursor.fetchall()}
+            # Worked
+            cursor.execute("""
+                SELECT e.full_name, e.nickname, SUM(h.hours_worked)
+                FROM employee_hours h
+                JOIN employees e ON h.employee_id = e.id
+                GROUP BY e.id
+            """)
+            worked_map = {full_name: (nickname, total or 0) for full_name, nickname, total in cursor.fetchall()}
+
+            # Credited
+            cursor.execute("""
+                SELECT e.full_name, e.nickname, SUM(c.hours)
+                FROM credit_audit c
+                JOIN employees e ON c.employee_id = e.id
+                GROUP BY e.id
+            """)
+            credits_map = {full_name: (nickname, total or 0) for full_name, nickname, total in cursor.fetchall()}
 
         employees = set(worked_map.keys()) | set(credits_map.keys())
         self.table.setRowCount(len(employees))
 
-        for r, emp in enumerate(sorted(employees)):
-            display_name = emp_map.get(emp, emp)
-            worked = worked_map.get(emp, 0)
-            produced = credits_map.get(emp, 0)
+        for r, full_name in enumerate(sorted(employees)):
+            nickname, worked = worked_map.get(full_name, (None, 0))
+            nickname_c, produced = credits_map.get(full_name, (None, 0))
+            display_name = nickname or nickname_c or full_name
             efficiency = produced / worked if worked > 0 else 0.0
 
             self.table.setItem(r, 0, QTableWidgetItem(display_name))
@@ -227,12 +265,10 @@ class CreditAuditLogTab(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Credit Audit Log"))
 
-        # --- Buttons ---
         btn_layout = QHBoxLayout()
         self.save_btn = QPushButton("Save Changes")
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
-
         self.save_btn.clicked.connect(self.save_changes)
 
         self.table = QTableWidget()
@@ -241,53 +277,42 @@ class CreditAuditLogTab(QWidget):
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked)
         layout.addWidget(self.table)
 
-        # F5 key to refresh tab
-        from key_bindings import add_refresh_shortcut
         add_refresh_shortcut(self, self.load_data)
-
         self.load_data()
 
     def load_data(self):
-        from utilities.employees import Employee
-        emp_map = {e.name: (e.nickname or e.name) for e in Employee.all()}
-
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                           SELECT id, date, ro_number, employee, hours, note
-                           FROM credit_audit
-                           ORDER BY id DESC
-                           """)
+                SELECT c.id, c.date, c.ro_id, e.full_name, e.nickname, c.hours, c.note
+                FROM credit_audit c
+                JOIN employees e ON c.employee_id = e.id
+                ORDER BY c.id DESC
+            """)
             rows = cursor.fetchall()
 
         self.table.setRowCount(len(rows))
         self.ids = []
-        for r, (row_id, date, ro_number, emp, hrs, note) in enumerate(rows):
+        for r, (row_id, date, ro_id, full_name, nickname, hrs, note) in enumerate(rows):
             self.ids.append(row_id)
-            display_name = emp_map.get(emp, emp)
+            display_name = nickname or full_name
 
-            # --- Date field as QDateEdit (calendar popup) ---
             date_edit = SafeDateEdit()
             date_edit.setDisplayFormat("MM/dd/yyyy")
             date_edit.setCalendarPopup(True)
-
-            # Parse stored ISO date (yyyy-MM-dd) and show as American (MM/dd/yyyy)
-            iso_str = date.split()[0]  # strip off any time portion if present
+            iso_str = date.split()[0]
             qdate = QDate.fromString(iso_str, "yyyy-MM-dd")
             if qdate.isValid():
                 date_edit.setDate(qdate)
             else:
                 date_edit.setDate(QDate.currentDate())
-
             self.table.setCellWidget(r, 0, date_edit)
 
-            # Other columns read-only
-            self.table.setItem(r, 1, QTableWidgetItem(str(ro_number)))
+            self.table.setItem(r, 1, QTableWidgetItem(str(ro_id)))
             self.table.setItem(r, 2, QTableWidgetItem(display_name))
             self.table.setItem(r, 3, QTableWidgetItem(f"{hrs:.2f}"))
             self.table.setItem(r, 4, QTableWidgetItem(note or ""))
 
-            # Lock other columns from editing
             for c in range(1, 5):
                 item = self.table.item(r, c)
                 if item:
