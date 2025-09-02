@@ -86,9 +86,9 @@ class RepairOrdersPage(QWidget):
 
         # --- Table ---
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["Date", "RO#", "Estimator", "Stage", "Status"]
+            ["Date", "RO#", "Estimator", "Tech", "Painter", "Stage", "Status"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -207,14 +207,42 @@ class RepairOrdersPage(QWidget):
             date_str = QDate.fromString(date, "yyyy-MM-dd").toString("MM/dd/yyyy")
             estimator_display = nickname or full_name or "Unassigned"
 
+            # --- Look up Tech and Painter assignments ---
+            with get_connection() as conn2:
+                cur2 = conn2.cursor()
+                cur2.execute("""
+                             SELECT e.full_name, e.nickname, a.role
+                             FROM ro_hours_allocation a
+                                      JOIN employees e ON a.employee_id = e.id
+                             WHERE a.ro_id = ?
+                             """, (ro_id,))
+                allocs = cur2.fetchall()
+
+            tech_name = ""
+            painter_name = ""
+            for fname, nname, role in allocs:
+                display = nname or fname
+                if role == "Tech" and not tech_name:
+                    tech_name = display
+                elif role == "Painter" and not painter_name:
+                    painter_name = display
+
+            if not tech_name:
+                tech_name = "Unassigned"
+            if not painter_name:
+                painter_name = "Unassigned"
+
+            # --- Populate table ---
             self.table.setItem(r, 0, QTableWidgetItem(date_str))
             self.table.setItem(r, 1, QTableWidgetItem(str(ro_number)))
             self.table.setItem(r, 2, QTableWidgetItem(estimator_display))
+            self.table.setItem(r, 3, QTableWidgetItem(tech_name))
+            self.table.setItem(r, 4, QTableWidgetItem(painter_name))
 
             stage_cb = SafeComboBox()
             stage_cb.addItems(stages)
             stage_cb.setCurrentText(stage or "Intake")
-            self.table.setCellWidget(r, 3, stage_cb)
+            self.table.setCellWidget(r, 5, stage_cb)
             stage_cb.currentTextChanged.connect(
                 lambda value, rid=ro_id: (
                     self.update_field(rid, "stage", value),
@@ -226,7 +254,7 @@ class RepairOrdersPage(QWidget):
             status_cb = SafeComboBox()
             status_cb.addItems(statuses)
             status_cb.setCurrentText(status or "Open")
-            self.table.setCellWidget(r, 4, status_cb)
+            self.table.setCellWidget(r, 6, status_cb)
             status_cb.currentTextChanged.connect(
                 lambda value, rid=ro_id: (
                     self.update_field(rid, "status", value),
@@ -241,6 +269,7 @@ class NewRODialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New Repair Order")
+        self.resize(450, 600)  # or whatever works best
 
         layout = QFormLayout(self)
 
@@ -391,6 +420,7 @@ class RODetailDialog(QDialog):
         super().__init__(parent)
         self.ro_id = ro_id
         self.setWindowTitle(f"Repair Order Details (ID {ro_id})")
+        self.resize(450, 600)  # or whatever works best
 
         layout = QFormLayout(self)
 
@@ -655,67 +685,113 @@ def safe_log_credit(ro_id, employee_id, hours, note):
 
 
 def update_ro_hours(ro_id):
-    """Recalculate and credit hours based on allocations + stage history."""
+    """Trigger or adjust credits based on current stage.
+       Each trigger fires once per RO, adjustments logged if bucket changes.
+    """
     with get_connection() as conn:
         cursor = conn.cursor()
-
         cursor.execute("""
-            SELECT hours_total, hours_body, hours_refinish, hours_mechanical
+            SELECT stage, hours_total, hours_body, hours_refinish, hours_mechanical
             FROM repair_orders WHERE id=?
         """, (ro_id,))
         row = cursor.fetchone()
         if not row:
             return
-        hours_total, hours_body, hours_refinish, hours_mechanical = row
+        stage, hours_total, hours_body, hours_refinish, hours_mechanical = row
 
-        # Stage history → furthest stage reached
-        cursor.execute("SELECT stage FROM ro_stage_history WHERE ro_id=? ORDER BY id", (ro_id,))
-        stages = [s[0] for s in cursor.fetchall()]
-        if not stages:
-            return
-
-        STAGES = [
-            "Scheduled", "Intake", "Disassembly", "Body", "Refinish",
-            "Reassembly", "Mechanical", "Detail", "QC", "Delivered"
-        ]
-        stage_order = {name: idx for idx, name in enumerate(STAGES)}
-        furthest_idx = max(stage_order[s] for s in stages if s in stage_order)
-
-        # Role → (stage, bucket)
-        # Note: no entries for Detail or QC → they won't credit hours
-        role_map = {
-            "Tech": ("Body", hours_body),
-            "Painter": ("Refinish", hours_refinish),
-            "Prepper": ("Refinish", hours_refinish),
-            "Mechanic": ("Mechanical", hours_mechanical),
-            "Estimator": ("Intake", hours_total),
+        stage_order = {
+            "Scheduled": 0, "Intake": 1, "Disassembly": 2, "Body": 3,
+            "Refinish": 4, "Reassembly": 5, "Mechanical": 6,
+            "Detail": 7, "QC": 8, "Delivered": 9
         }
+        cur_idx = stage_order.get(stage, 0)
 
-        # Allocations
         cursor.execute("SELECT employee_id, role, percent FROM ro_hours_allocation WHERE ro_id=?", (ro_id,))
         allocations = cursor.fetchall()
 
+        # Already credited by label
+        cursor.execute("""
+            SELECT employee_id, note, SUM(hours)
+            FROM credit_audit
+            WHERE ro_id=?
+            GROUP BY employee_id, note
+        """, (ro_id,))
+        credited = {(emp, note): hrs for emp, note, hrs in cursor.fetchall()}
+
         taken = 0.0
         for emp_id, role, percent in allocations:
-            if role not in role_map:
-                continue
-            stage, bucket = role_map[role]
-            if bucket <= 0:
-                continue
-            if furthest_idx > stage_order[stage]:
-                credit_hours = bucket * (percent / 100.0)
-                taken += credit_hours
-                safe_log_credit(ro_id, emp_id, credit_hours, f"{role} credited at {stage}")
+            if role == "Tech" and hours_body > 0:
+                # 60% trigger
+                if cur_idx >= stage_order["Refinish"]:
+                    label = "Body (60%)"
+                    exp = hours_body * 0.6 * (percent / 100.0)
+                    prev = credited.get((emp_id, f"{label} hours added"), 0.0) \
+                           + credited.get((emp_id, f"{label} hours adjustment"), 0.0)
+                    diff = exp - prev
+                    if abs(diff) > 0.01:
+                        note = f"{label} hours added" if prev == 0 else f"{label} hours adjustment"
+                        log_credit(ro_id, emp_id, diff, note)
+                    taken += exp
 
+                # 40% trigger
+                if cur_idx >= stage_order["Detail"]:
+                    label = "Body (40%)"
+                    exp = hours_body * 0.4 * (percent / 100.0)
+                    prev = credited.get((emp_id, f"{label} hours added"), 0.0) \
+                           + credited.get((emp_id, f"{label} hours adjustment"), 0.0)
+                    diff = exp - prev
+                    if abs(diff) > 0.01:
+                        note = f"{label} hours added" if prev == 0 else f"{label} hours adjustment"
+                        log_credit(ro_id, emp_id, diff, note)
+                    taken += exp
+
+            elif role in ("Painter", "Prepper") and hours_refinish > 0:
+                if cur_idx >= stage_order["Reassembly"]:
+                    label = "Refinish"
+                    exp = hours_refinish * (percent / 100.0)
+                    prev = credited.get((emp_id, f"{label} hours added"), 0.0) \
+                           + credited.get((emp_id, f"{label} hours adjustment"), 0.0)
+                    diff = exp - prev
+                    if abs(diff) > 0.01:
+                        note = f"{label} hours added" if prev == 0 else f"{label} hours adjustment"
+                        log_credit(ro_id, emp_id, diff, note)
+                    taken += exp
+
+            elif role == "Mechanic" and hours_mechanical > 0:
+                if cur_idx >= stage_order["Detail"]:
+                    label = "Mechanical"
+                    exp = hours_mechanical * (percent / 100.0)
+                    prev = credited.get((emp_id, f"{label} hours added"), 0.0) \
+                           + credited.get((emp_id, f"{label} hours adjustment"), 0.0)
+                    diff = exp - prev
+                    if abs(diff) > 0.01:
+                        note = f"{label} hours added" if prev == 0 else f"{label} hours adjustment"
+                        log_credit(ro_id, emp_id, diff, note)
+                    taken += exp
+
+            elif role == "Estimator" and hours_total > 0:
+                if cur_idx >= stage_order["Intake"]:
+                    label = "Estimator"
+                    exp = hours_total * (percent / 100.0)
+                    prev = credited.get((emp_id, f"{label} hours added"), 0.0) \
+                           + credited.get((emp_id, f"{label} hours adjustment"), 0.0)
+                    diff = exp - prev
+                    if abs(diff) > 0.01:
+                        note = f"{label} hours added" if prev == 0 else f"{label} hours adjustment"
+                        log_credit(ro_id, emp_id, diff, note)
+                    taken += exp
+
+        # Update totals
         remaining = max(hours_total - taken, 0.0)
-        cursor.execute(
-            "UPDATE repair_orders SET hours_taken=?, hours_remaining=? WHERE id=?",
-            (taken, remaining, ro_id),
-        )
+        cursor.execute("""
+            UPDATE repair_orders
+            SET hours_taken=?, hours_remaining=?
+            WHERE id=?
+        """, (taken, remaining, ro_id))
 
 
 def apply_uncredited_hours(ro_id):
-    """On RO close, reconcile credits with allocation totals, using role-specific buckets."""
+    """When RO is closed, force-credit any remaining hours by bucket."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -723,11 +799,9 @@ def apply_uncredited_hours(ro_id):
             FROM repair_orders WHERE id=?
         """, (ro_id,))
         row = cursor.fetchone()
-        if not row:
-            return
+        if not row: return
         hours_total, hours_body, hours_refinish, hours_mechanical = row
 
-        # Buckets by role (no Detail/QC)
         role_buckets = {
             "Tech": hours_body,
             "Painter": hours_refinish,
@@ -736,9 +810,9 @@ def apply_uncredited_hours(ro_id):
             "Estimator": hours_total,
         }
 
-        # Expected allocations
         cursor.execute("SELECT employee_id, role, percent FROM ro_hours_allocation WHERE ro_id=?", (ro_id,))
         allocations = cursor.fetchall()
+
         expected = {}
         for emp_id, role, percent in allocations:
             bucket = role_buckets.get(role, 0)
@@ -746,17 +820,11 @@ def apply_uncredited_hours(ro_id):
                 expected.setdefault(emp_id, 0)
                 expected[emp_id] += bucket * (percent / 100.0)
 
-        # Already credited
-        cursor.execute("""
-            SELECT employee_id, SUM(hours) FROM credit_audit
-            WHERE ro_id=?
-            GROUP BY employee_id
-        """, (ro_id,))
+        cursor.execute("SELECT employee_id, SUM(hours) FROM credit_audit WHERE ro_id=? GROUP BY employee_id", (ro_id,))
         credited = {emp: hrs for emp, hrs in cursor.fetchall()}
 
         for emp_id, exp_total in expected.items():
-            credited_total = credited.get(emp_id, 0)
-            diff = exp_total - credited_total
+            diff = exp_total - credited.get(emp_id, 0)
             if abs(diff) > 0.01:
                 log_credit(ro_id, emp_id, diff, "Adjustment on close (recalc)")
 

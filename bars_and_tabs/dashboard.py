@@ -53,12 +53,22 @@ class DashboardPage(QWidget):
 
             # --- Hours assigned per employee (from allocations) ---
             cursor.execute("""
-                           SELECT e.full_name, e.nickname, a.role, SUM(r.hours_total * a.percent / 100.0)
-                           FROM ro_hours_allocation a
-                                    JOIN repair_orders r ON a.ro_id = r.id
-                                    JOIN employees e ON a.employee_id = e.id
-                           WHERE r.status != 'Closed'
-                           GROUP BY e.id, a.role
+                            SELECT e.full_name, e.nickname, a.role,
+                                SUM(
+                                     CASE
+                                       WHEN a.role='Tech'    THEN r.hours_body * a.percent / 100.0
+                                       WHEN a.role IN ('Painter','Prepper') THEN r.hours_refinish * a.percent / 100.0
+                                       WHEN a.role='Mechanic' THEN r.hours_mechanical * a.percent / 100.0
+                                       WHEN a.role='Estimator' THEN r.hours_total * a.percent / 100.0
+                                       ELSE 0
+                                     END
+                                   )
+                            FROM ro_hours_allocation a
+                            JOIN repair_orders r ON a.ro_id = r.id
+                            JOIN employees e ON a.employee_id = e.id
+                            WHERE r.status != 'Closed'
+                              AND r.stage NOT IN ('Scheduled','Detail','QC','Delivered')
+                            GROUP BY e.id, a.role
                            """)
             rows = cursor.fetchall()
 
